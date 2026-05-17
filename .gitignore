@@ -21,3 +21,6 @@ Resources/AppIcon.iconset/
 *.key
 .env
 .env.local
+
+# rust-tui build artifacts
+rust-tui/target/

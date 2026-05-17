@@ -1,0 +1,606 @@
+use std::collections::{HashMap, HashSet};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use crate::ai;
+use crate::models::SessionInfo;
+use crate::notifications::Notifier;
+use crate::scanner;
+use crate::watcher;
+
+/// One row in the visible list — either a project header or a session row.
+#[derive(Clone)]
+pub enum Row {
+    Header {
+        cwd: String,
+        total: usize,
+        alive: usize,
+        collapsed: bool,
+    },
+    Session(usize), // index into App.sessions
+}
+
+/// Top-level UI mode.
+pub enum Mode {
+    Browse,
+    Filter,
+    Rename,
+    Confirm(ConfirmAction),
+    Help,
+    Launch(LaunchForm),
+}
+
+#[derive(Clone)]
+pub struct LaunchForm {
+    pub cwd: String,
+    pub resume_id: Option<String>,
+    pub field: usize,
+    pub model: LaunchModel,
+    pub dangerously_skip_permissions: bool,
+    pub sandbox: bool,
+    pub verbose: bool,
+    pub add_dir: String,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum LaunchModel {
+    Auto,
+    Opus,
+    Sonnet,
+    Haiku,
+}
+
+impl LaunchModel {
+    pub fn label(&self) -> &'static str {
+        match self {
+            LaunchModel::Auto => "auto",
+            LaunchModel::Opus => "opus",
+            LaunchModel::Sonnet => "sonnet",
+            LaunchModel::Haiku => "haiku",
+        }
+    }
+    pub fn flag(&self) -> Option<&'static str> {
+        match self {
+            LaunchModel::Auto => None,
+            LaunchModel::Opus => Some("opus"),
+            LaunchModel::Sonnet => Some("sonnet"),
+            LaunchModel::Haiku => Some("haiku"),
+        }
+    }
+    pub fn cycle(&self) -> Self {
+        match self {
+            LaunchModel::Auto => LaunchModel::Opus,
+            LaunchModel::Opus => LaunchModel::Sonnet,
+            LaunchModel::Sonnet => LaunchModel::Haiku,
+            LaunchModel::Haiku => LaunchModel::Auto,
+        }
+    }
+}
+
+impl LaunchForm {
+    pub fn new(cwd: String, resume_id: Option<String>) -> Self {
+        LaunchForm {
+            cwd,
+            resume_id,
+            field: 0,
+            model: LaunchModel::Auto,
+            dangerously_skip_permissions: false,
+            sandbox: false,
+            verbose: false,
+            add_dir: String::new(),
+        }
+    }
+
+    pub const FIELD_COUNT: usize = 5;
+
+    pub fn field_label(&self, i: usize) -> &'static str {
+        match i {
+            0 => "model",
+            1 => "--dangerously-skip-permissions",
+            2 => "--sandbox",
+            3 => "--verbose",
+            4 => "--add-dir",
+            _ => "",
+        }
+    }
+
+    pub fn field_value(&self, i: usize) -> String {
+        match i {
+            0 => self.model.label().to_string(),
+            1 => bool_label(self.dangerously_skip_permissions),
+            2 => bool_label(self.sandbox),
+            3 => bool_label(self.verbose),
+            4 => {
+                if self.add_dir.is_empty() {
+                    "—".into()
+                } else {
+                    self.add_dir.clone()
+                }
+            }
+            _ => String::new(),
+        }
+    }
+
+    pub fn toggle_field(&mut self) {
+        match self.field {
+            0 => self.model = self.model.cycle(),
+            1 => self.dangerously_skip_permissions = !self.dangerously_skip_permissions,
+            2 => self.sandbox = !self.sandbox,
+            3 => self.verbose = !self.verbose,
+            _ => {}
+        }
+    }
+
+    pub fn args(&self) -> Vec<String> {
+        let mut a = Vec::new();
+        if let Some(id) = &self.resume_id {
+            a.push("--resume".into());
+            a.push(id.clone());
+        }
+        if let Some(m) = self.model.flag() {
+            a.push("--model".into());
+            a.push(m.into());
+        }
+        if self.dangerously_skip_permissions {
+            a.push("--dangerously-skip-permissions".into());
+        }
+        if self.sandbox {
+            a.push("--sandbox".into());
+        }
+        if self.verbose {
+            a.push("--verbose".into());
+        }
+        if !self.add_dir.is_empty() {
+            a.push("--add-dir".into());
+            a.push(self.add_dir.clone());
+        }
+        a
+    }
+}
+
+fn bool_label(b: bool) -> String {
+    if b { "[x]".into() } else { "[ ]".into() }
+}
+
+#[derive(Clone)]
+pub enum ConfirmAction {
+    DeleteJunk,
+    DeleteEmpty,
+}
+
+impl ConfirmAction {
+    pub fn prompt(&self) -> &'static str {
+        match self {
+            ConfirmAction::DeleteJunk => "Delete junk sessions? (tmp / no messages)",
+            ConfirmAction::DeleteEmpty => "Delete sessions with no messages?",
+        }
+    }
+}
+
+pub struct App {
+    pub sessions: Vec<SessionInfo>,
+    pub selected: usize,
+    pub filter: String,
+    pub rename_buf: String,
+    pub mode: Mode,
+    pub history_days: i64,
+    pub last_scan: Instant,
+    pub scanning: bool,
+    pub spinner_phase: usize,
+    pub message: Option<(String, Instant)>,
+    pub custom_names: HashMap<String, String>,
+    pub group_by_directory: bool,
+    pub collapsed_groups: HashSet<String>,
+    pub ai_running: bool,
+    pub auto_naming: bool,
+    pub auto_name_progress: (usize, usize), // (done, total)
+    pub notifier: Notifier,
+    pub watcher_active: bool,
+    last_live_sweep: Instant,
+    dirty_since: Option<Instant>,
+    rx: mpsc::Receiver<Vec<SessionInfo>>,
+    tx: mpsc::Sender<Vec<SessionInfo>>,
+    ai_rx: mpsc::Receiver<AiEvent>,
+    ai_tx: mpsc::Sender<AiEvent>,
+    watch_rx: mpsc::Receiver<()>,
+}
+
+pub enum AiEvent {
+    SearchHit(Option<String>),                    // matched session id
+    NameSuggestion { session_id: String, name: String },
+    AutoNameDone,
+}
+
+#[derive(Clone)]
+pub enum PendingExec {
+    Resume { id: String, cwd: String },
+    NewClaude { cwd: String },
+    NewShell { cwd: String },
+    Custom { cwd: String, args: Vec<String> },
+}
+
+impl App {
+    pub fn new(history_days: i64) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let (ai_tx, ai_rx) = mpsc::channel();
+        let (watch_tx, watch_rx) = mpsc::channel();
+        let watcher_active = watcher::spawn(watch_tx);
+        let mut app = App {
+            sessions: Vec::new(),
+            selected: 0,
+            filter: String::new(),
+            rename_buf: String::new(),
+            mode: Mode::Browse,
+            history_days,
+            last_scan: Instant::now() - Duration::from_secs(60),
+            scanning: false,
+            spinner_phase: 0,
+            message: None,
+            custom_names: scanner::load_custom_names(),
+            group_by_directory: true,
+            collapsed_groups: HashSet::new(),
+            ai_running: false,
+            auto_naming: false,
+            auto_name_progress: (0, 0),
+            notifier: Notifier::new(true),
+            watcher_active,
+            last_live_sweep: Instant::now() - Duration::from_secs(60),
+            dirty_since: None,
+            rx,
+            tx,
+            ai_rx,
+            ai_tx,
+            watch_rx,
+        };
+        app.kick_scan();
+        app
+    }
+
+    pub fn kick_scan(&mut self) {
+        if self.scanning {
+            return;
+        }
+        self.scanning = true;
+        let tx = self.tx.clone();
+        let days = self.history_days;
+        thread::spawn(move || {
+            let result = scanner::scan(days);
+            let _ = tx.send(result);
+        });
+    }
+
+    pub fn tick(&mut self) {
+        self.spinner_phase = (self.spinner_phase + 1) % 8;
+        if let Ok(result) = self.rx.try_recv() {
+            self.sessions = result;
+            self.scanning = false;
+            self.last_scan = Instant::now();
+            self.notifier.observe(&self.sessions);
+            self.clamp_selection();
+        }
+        // Drain AI events that arrived.
+        while let Ok(ev) = self.ai_rx.try_recv() {
+            self.handle_ai_event(ev);
+        }
+        // Drain file-watcher events — coalesce into a single dirty flag.
+        let mut got_event = false;
+        while let Ok(()) = self.watch_rx.try_recv() {
+            got_event = true;
+        }
+        if got_event {
+            self.dirty_since = Some(Instant::now());
+        }
+        // Debounced event-driven scan: ~180ms after the last event, kick a scan.
+        if let Some(t) = self.dirty_since {
+            if t.elapsed() >= Duration::from_millis(180) && !self.scanning {
+                self.kick_scan();
+                self.dirty_since = None;
+            }
+        }
+        // Lightweight PID/status sweep every ~1.5s — picks up busy↔idle quickly
+        // without touching JSONL files.
+        if self.last_live_sweep.elapsed() >= Duration::from_millis(1500) {
+            scanner::refresh_live_status(&mut self.sessions);
+            self.notifier.observe(&self.sessions);
+            self.last_live_sweep = Instant::now();
+        }
+        // Fallback full scan. Faster when watcher couldn't attach.
+        let fallback = if self.watcher_active {
+            Duration::from_secs(30)
+        } else {
+            Duration::from_secs(5)
+        };
+        if self.last_scan.elapsed() >= fallback && !self.scanning {
+            self.kick_scan();
+        }
+        if let Some((_, when)) = self.message {
+            if when.elapsed() > Duration::from_secs(3) {
+                self.message = None;
+            }
+        }
+    }
+
+    fn handle_ai_event(&mut self, ev: AiEvent) {
+        match ev {
+            AiEvent::SearchHit(opt) => {
+                self.ai_running = false;
+                match opt {
+                    Some(id) => {
+                        let vis = self.visible_session_indices();
+                        if let Some(pos) = vis.iter().position(|i| self.sessions[*i].id == id) {
+                            self.selected = pos;
+                            self.flash("AI: found a match");
+                        } else if let Some(pos_all) =
+                            self.sessions.iter().position(|s| s.id == id)
+                        {
+                            // The match might be hidden by filter or collapsed group; expose it.
+                            let cwd = self.sessions[pos_all].cwd.clone();
+                            self.collapsed_groups.remove(&cwd);
+                            self.filter.clear();
+                            let vis = self.visible_session_indices();
+                            if let Some(p) = vis.iter().position(|i| self.sessions[*i].id == id) {
+                                self.selected = p;
+                            }
+                            self.flash("AI: cleared filter to reveal match");
+                        } else {
+                            self.flash("AI: match not in current list");
+                        }
+                    }
+                    None => self.flash("AI: no match"),
+                }
+            }
+            AiEvent::NameSuggestion { session_id, name } => {
+                self.custom_names.insert(session_id.clone(), name.clone());
+                let _ = scanner::save_custom_names(&self.custom_names);
+                if let Some(idx) = self.sessions.iter().position(|s| s.id == session_id) {
+                    self.sessions[idx].name = name;
+                }
+                self.auto_name_progress.0 += 1;
+            }
+            AiEvent::AutoNameDone => {
+                self.auto_naming = false;
+                let n = self.auto_name_progress.0;
+                self.flash(format!("auto-named {} session(s)", n));
+            }
+        }
+    }
+
+    pub fn kick_ai_search(&mut self, query: String) {
+        if self.ai_running {
+            return;
+        }
+        self.ai_running = true;
+        let tx = self.ai_tx.clone();
+        let sessions = self.sessions.clone();
+        std::thread::spawn(move || {
+            let id = ai::search(&query, &sessions);
+            let _ = tx.send(AiEvent::SearchHit(id));
+        });
+    }
+
+    pub fn kick_auto_name(&mut self) {
+        if self.auto_naming {
+            return;
+        }
+        // Pick candidates: not custom-named, not ai-titled (i.e., name == short_path(cwd)),
+        // and has actual conversation.
+        use crate::models::short_path;
+        let mut cands: Vec<(String, String)> = Vec::new(); // (id, snippet later)
+        for s in &self.sessions {
+            if s.usage.message_count == 0 {
+                continue;
+            }
+            if self.custom_names.contains_key(&s.id) {
+                continue;
+            }
+            if s.name == short_path(&s.cwd) {
+                cands.push((s.id.clone(), s.id.clone()));
+            }
+            if cands.len() >= 12 {
+                break;
+            }
+        }
+        if cands.is_empty() {
+            self.flash("nothing to auto-name");
+            return;
+        }
+        self.auto_naming = true;
+        self.auto_name_progress = (0, cands.len());
+        let tx = self.ai_tx.clone();
+        let projects_dir = scanner::claude_dir().join("projects");
+        std::thread::spawn(move || {
+            for (id, _) in cands {
+                let snippet = match ai::sample_session_text(&projects_dir, &id) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if let Some(name) = ai::suggest_name(&snippet) {
+                    let _ = tx.send(AiEvent::NameSuggestion { session_id: id, name });
+                }
+            }
+            let _ = tx.send(AiEvent::AutoNameDone);
+        });
+    }
+
+    /// All sessions that pass the literal filter, in display order.
+    pub fn filtered_indices(&self) -> Vec<usize> {
+        if self.filter.is_empty() {
+            return (0..self.sessions.len()).collect();
+        }
+        let q = self.filter.to_ascii_lowercase();
+        self.sessions
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| {
+                s.name.to_ascii_lowercase().contains(&q)
+                    || s.cwd.to_ascii_lowercase().contains(&q)
+                    || s.id.to_ascii_lowercase().contains(&q)
+                    || s.model
+                        .as_deref()
+                        .map(|m| m.to_ascii_lowercase().contains(&q))
+                        .unwrap_or(false)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Sessions visible to the user — same as filtered, minus any inside a
+    /// collapsed group. This is what `selected` indexes into.
+    pub fn visible_session_indices(&self) -> Vec<usize> {
+        let filtered = self.filtered_indices();
+        if !self.group_by_directory || self.collapsed_groups.is_empty() {
+            return filtered;
+        }
+        filtered
+            .into_iter()
+            .filter(|&i| !self.collapsed_groups.contains(&self.sessions[i].cwd))
+            .collect()
+    }
+
+    /// Headers + sessions woven together in display order. Used by the renderer.
+    pub fn visible_rows(&self) -> Vec<Row> {
+        let filtered = self.filtered_indices();
+        if !self.group_by_directory {
+            return filtered.into_iter().map(Row::Session).collect();
+        }
+
+        let mut out: Vec<Row> = Vec::new();
+        let mut last_cwd: Option<String> = None;
+
+        for &idx in &filtered {
+            let s = &self.sessions[idx];
+            if last_cwd.as_deref() != Some(&s.cwd) {
+                last_cwd = Some(s.cwd.clone());
+                let total = filtered
+                    .iter()
+                    .filter(|&&j| self.sessions[j].cwd == s.cwd)
+                    .count();
+                let alive = filtered
+                    .iter()
+                    .filter(|&&j| self.sessions[j].cwd == s.cwd && self.sessions[j].is_alive)
+                    .count();
+                out.push(Row::Header {
+                    cwd: s.cwd.clone(),
+                    total,
+                    alive,
+                    collapsed: self.collapsed_groups.contains(&s.cwd),
+                });
+            }
+            if !self.collapsed_groups.contains(&s.cwd) {
+                out.push(Row::Session(idx));
+            }
+        }
+        out
+    }
+
+    pub fn selected_session(&self) -> Option<&SessionInfo> {
+        let idxs = self.visible_session_indices();
+        idxs.get(self.selected).and_then(|i| self.sessions.get(*i))
+    }
+
+    pub fn toggle_group_of_selection(&mut self) {
+        if let Some(s) = self.selected_session() {
+            let cwd = s.cwd.clone();
+            if self.collapsed_groups.contains(&cwd) {
+                self.collapsed_groups.remove(&cwd);
+            } else {
+                self.collapsed_groups.insert(cwd);
+                // Move selection to a still-visible session.
+                self.clamp_selection();
+            }
+        }
+    }
+
+    pub fn collapse_all_inactive(&mut self) {
+        let mut by_cwd: HashMap<String, (bool, usize)> = HashMap::new();
+        for s in &self.sessions {
+            let e = by_cwd.entry(s.cwd.clone()).or_insert((false, 0));
+            if s.is_recently_active() {
+                e.0 = true;
+            }
+            e.1 += 1;
+        }
+        for (cwd, (has_active, _)) in by_cwd {
+            if !has_active {
+                self.collapsed_groups.insert(cwd);
+            }
+        }
+        self.clamp_selection();
+    }
+
+    pub fn clamp_selection(&mut self) {
+        let len = self.visible_session_indices().len();
+        if len == 0 {
+            self.selected = 0;
+            return;
+        }
+        if self.selected >= len {
+            self.selected = len - 1;
+        }
+    }
+
+    pub fn move_selection(&mut self, delta: isize) {
+        let len = self.visible_session_indices().len();
+        if len == 0 {
+            return;
+        }
+        let cur = self.selected as isize;
+        let next = (cur + delta).rem_euclid(len as isize) as usize;
+        self.selected = next;
+    }
+
+    pub fn flash(&mut self, msg: impl Into<String>) {
+        self.message = Some((msg.into(), Instant::now()));
+    }
+
+    pub fn perform_confirm(&mut self) {
+        if let Mode::Confirm(action) = &self.mode {
+            let action = action.clone();
+            match action {
+                ConfirmAction::DeleteJunk => {
+                    let (ids, n) = scanner::delete_sessions(&self.sessions, scanner::is_junk_session);
+                    self.sessions.retain(|s| !ids.contains(&s.id));
+                    self.clamp_selection();
+                    self.flash(format!("deleted {} junk session(s)", n));
+                }
+                ConfirmAction::DeleteEmpty => {
+                    let (ids, n) = scanner::delete_sessions(&self.sessions, scanner::is_empty_session);
+                    self.sessions.retain(|s| !ids.contains(&s.id));
+                    self.clamp_selection();
+                    self.flash(format!("deleted {} empty session(s)", n));
+                }
+            }
+        }
+        self.mode = Mode::Browse;
+    }
+
+    pub fn total_cost(&self) -> f64 {
+        self.sessions.iter().map(|s| s.cost).sum()
+    }
+
+    pub fn active_count(&self) -> usize {
+        self.sessions.iter().filter(|s| s.is_alive).count()
+    }
+
+    pub fn rename_selected(&mut self) {
+        if let Some(s) = self.selected_session() {
+            let id = s.id.clone();
+            let new = self.rename_buf.trim().to_string();
+            if new.is_empty() {
+                self.custom_names.remove(&id);
+            } else {
+                self.custom_names.insert(id.clone(), new.clone());
+            }
+            let _ = scanner::save_custom_names(&self.custom_names);
+            if let Some(idx) = self.sessions.iter().position(|s| s.id == id) {
+                self.sessions[idx].name = if new.is_empty() {
+                    crate::models::short_path(&self.sessions[idx].cwd)
+                } else {
+                    new
+                };
+            }
+        }
+        self.rename_buf.clear();
+    }
+}
