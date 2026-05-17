@@ -25,12 +25,13 @@ struct ContentView: View {
     var body: some View {
         HStack(spacing: 0) {
             sidebar
-                .frame(width: 290)
+                .frame(width: 290 + (settings.fontSize - 13) * 6)
             Divider().background(Color.white.opacity(0.05))
             terminalPanel
         }
         .background(BG_DARKEST)
         .preferredColorScheme(.dark)
+        .environment(\.uiScale, settings.fontSize / 13.0)
         .onAppear {
             manager.startPolling()
             NSApp.activate(ignoringOtherApps: true)
@@ -248,6 +249,8 @@ struct ContentView: View {
 
     private var terminalPanel: some View {
         VStack(spacing: 0) {
+            tabBar
+            Divider().background(Color.white.opacity(0.05))
             if let tid = activeTerminalId, let terminal = terminals[tid] {
                 terminalToolbar(for: tid, terminal: terminal)
                 TerminalViewRepresentable(terminalView: terminal.terminalView)
@@ -259,19 +262,80 @@ struct ContentView: View {
         .background(BG_DARKEST)
     }
 
+    private var tabBar: some View {
+        HStack(spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    ForEach(orderedTerminalIds, id: \.self) { tid in
+                        if let terminal = terminals[tid] {
+                            TabChip(
+                                terminal: terminal,
+                                sessionName: nameForTerminal(terminal),
+                                isActive: activeTerminalId == tid,
+                                onSelect: { activeTerminalId = tid },
+                                onClose: { closeTerminal(tid) }
+                            )
+                        }
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+            }
+            HStack(spacing: 4) {
+                Button(action: newShellSession) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(width: 26, height: 26)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.04)))
+                        .foregroundColor(TEXT_DIM)
+                }
+                .buttonStyle(.plain)
+                .help("New shell tab (⌘T)")
+                .keyboardShortcut("t")
+            }
+            .padding(.trailing, 8)
+        }
+        .frame(height: 38)
+        .background(BG_DARK)
+    }
+
+    @State private var orderedTerminalIds: [String] = []
+
+    private func nameForTerminal(_ t: TerminalSession) -> String {
+        if case .claude(let resumeId) = t.mode, let rid = resumeId,
+           let session = manager.sessions.first(where: { $0.sessionId == rid }) {
+            return session.name
+        }
+        switch t.mode {
+        case .shell: return "shell"
+        case .claude: return "claude"
+        }
+    }
+
+    private func closeTerminal(_ id: String) {
+        terminals[id]?.terminate()
+        terminals.removeValue(forKey: id)
+        orderedTerminalIds.removeAll { $0 == id }
+        if activeTerminalId == id {
+            activeTerminalId = orderedTerminalIds.last
+        }
+    }
+
     private func terminalToolbar(for id: String, terminal: TerminalSession) -> some View {
-        let session = manager.sessions.first { $0.id == id }
+        let session: SessionInfo? = {
+            if case .claude(let rid) = terminal.mode, let rid {
+                return manager.sessions.first { $0.sessionId == rid }
+            }
+            return nil
+        }()
         let modeLabel: String = {
             switch terminal.mode {
             case .shell: return "shell"
             case .claude: return "claude"
             }
         }()
-
         return HStack(spacing: 10) {
-            Circle()
-                .fill(GOLD)
-                .frame(width: 6, height: 6)
+            Circle().fill(GOLD).frame(width: 6, height: 6)
             Text(session?.name ?? "Terminal")
                 .font(.system(size: 12, weight: .semibold, design: .monospaced))
                 .foregroundColor(TEXT_PRIMARY)
@@ -301,15 +365,13 @@ struct ContentView: View {
                 .buttonStyle(.plain)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 14).padding(.vertical, 8)
         .background(BG_DARK)
     }
 
     private var emptyState: some View {
         VStack(spacing: 18) {
-            MinionDot(size: 56)
-                .opacity(0.6)
+            MinionDot(size: 56).opacity(0.6)
             VStack(spacing: 4) {
                 Text("Welcome to MinionsCode")
                     .font(.system(size: 16, weight: .bold))
@@ -359,12 +421,14 @@ struct ContentView: View {
         let cwd = manager.selectedSession?.cwd ?? FileManager.default.homeDirectoryForCurrentUser.path
         let terminal = TerminalSession(mode: .shell, cwd: cwd)
         terminals[terminal.id] = terminal
+        orderedTerminalIds.append(terminal.id)
         activeTerminalId = terminal.id
     }
 
     private func newClaudeSession() {
         let terminal = TerminalSession(mode: .claude(resumeId: nil))
         terminals[terminal.id] = terminal
+        orderedTerminalIds.append(terminal.id)
         activeTerminalId = terminal.id
     }
 
@@ -383,6 +447,7 @@ struct ContentView: View {
         }
         let terminal = TerminalSession(mode: .claude(resumeId: session.sessionId), cwd: session.cwd)
         terminals[session.id] = terminal
+        orderedTerminalIds.append(session.id)
         activeTerminalId = session.id
     }
 
@@ -394,6 +459,57 @@ struct ContentView: View {
     private func commitRename(_ session: SessionInfo) {
         manager.renameSession(session.id, to: nameInput)
         editingName = nil
+    }
+}
+
+struct TabChip: View {
+    let terminal: TerminalSession
+    let sessionName: String
+    let isActive: Bool
+    let onSelect: () -> Void
+    let onClose: () -> Void
+    @State private var isHovering = false
+
+    private var modeIcon: String {
+        switch terminal.mode {
+        case .shell: return "terminal"
+        case .claude: return "sparkles"
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: modeIcon)
+                .font(.system(size: 10))
+                .foregroundColor(isActive ? Color(red: 1.0, green: 0.78, blue: 0.10) : .white.opacity(0.5))
+            Text(sessionName)
+                .font(.system(size: 11, weight: isActive ? .semibold : .regular))
+                .foregroundColor(isActive ? .white : .white.opacity(0.6))
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .frame(width: 14, height: 14)
+                    .background(Circle().fill(isHovering ? Color.white.opacity(0.1) : Color.clear))
+                    .foregroundColor(.white.opacity(isHovering ? 0.8 : 0.4))
+            }
+            .buttonStyle(.plain)
+            .onHover { isHovering = $0 }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .frame(minWidth: 100, maxWidth: 200)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isActive ? Color(red: 1.0, green: 0.78, blue: 0.10).opacity(0.12) : Color.white.opacity(0.03))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(isActive ? Color(red: 1.0, green: 0.78, blue: 0.10).opacity(0.4) : Color.clear, lineWidth: 1)
+                )
+        )
+        .contentShape(Rectangle())
+        .onTapGesture { onSelect() }
     }
 }
 
@@ -481,25 +597,36 @@ struct SessionGroup: View {
     let sessions: [SessionInfo]
     let viewModel: SessionViewModel
     @State private var expanded = true
+    @State private var hovering = false
 
     var body: some View {
         VStack(spacing: 2) {
-            Button { withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() } } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .bold))
-                    Text(title)
-                        .font(.system(size: 10, weight: .heavy))
-                        .tracking(0.5)
-                    Spacer()
-                    Text("\(sessions.count)")
-                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                        .foregroundColor(.white.opacity(0.4))
-                }
-                .padding(.horizontal, 8).padding(.vertical, 5)
-                .foregroundColor(.white.opacity(0.5))
+            HStack(spacing: 6) {
+                Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 9, weight: .bold))
+                    .frame(width: 12)
+                Text(title)
+                    .font(.system(size: 10, weight: .heavy))
+                    .tracking(0.5)
+                    .lineLimit(1)
+                Spacer()
+                Text("\(sessions.count)")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .foregroundColor(.white.opacity(0.4))
             }
-            .buttonStyle(.plain)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(hovering ? Color.white.opacity(0.04) : Color.clear)
+            )
+            .foregroundColor(.white.opacity(0.55))
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
+            .onTapGesture {
+                withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+            }
 
             if expanded {
                 ForEach(sessions) { session in
@@ -513,6 +640,7 @@ struct SessionGroup: View {
 struct SessionCard: View {
     let session: SessionInfo
     let viewModel: SessionViewModel
+    @Environment(\.uiScale) private var scale
     private var isActive: Bool { viewModel.activeId == session.id }
     private var isEditing: Bool { viewModel.editingId == session.id }
 
@@ -525,17 +653,17 @@ struct SessionCard: View {
                 if isEditing {
                     TextField("Name", text: viewModel.nameInput, onCommit: { viewModel.onCommitRename(session) })
                         .textFieldStyle(.plain)
-                        .font(.system(size: 11, weight: .semibold))
+                        .scaledFont(11, weight: .semibold)
                         .foregroundColor(.white)
                 } else {
                     Text(session.name)
-                        .font(.system(size: 11, weight: .semibold))
+                        .scaledFont(11, weight: .semibold)
                         .foregroundColor(.white.opacity(0.92))
                         .lineLimit(1)
                 }
                 Spacer()
                 Text(fmtCost(session.cost))
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .scaledFont(10, weight: .bold, design: .monospaced)
                     .foregroundColor(Color.orange.opacity(0.85))
             }
             HStack(spacing: 8) {
@@ -553,7 +681,7 @@ struct SessionCard: View {
                 Text("⚡\(fmtPct(session.cacheHitRate))")
                     .foregroundColor(session.cacheHitRate > 0.7 ? .green.opacity(0.7) : .yellow.opacity(0.7))
             }
-            .font(.system(size: 9, design: .monospaced))
+            .scaledFont(9, design: .monospaced)
             .foregroundColor(.white.opacity(0.32))
         }
         .padding(.horizontal, 10).padding(.vertical, 8)
@@ -653,6 +781,34 @@ extension Color {
         let g = Double((hex >> 8) & 0xFF) / 255
         let b = Double(hex & 0xFF) / 255
         self.init(red: r, green: g, blue: b)
+    }
+}
+
+private struct UIScaleKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 1.0
+}
+
+extension EnvironmentValues {
+    var uiScale: CGFloat {
+        get { self[UIScaleKey.self] }
+        set { self[UIScaleKey.self] = newValue }
+    }
+}
+
+extension View {
+    func scaledFont(_ size: CGFloat, weight: Font.Weight = .regular, design: Font.Design = .default) -> some View {
+        modifier(ScaledFontModifier(size: size, weight: weight, design: design))
+    }
+}
+
+struct ScaledFontModifier: ViewModifier {
+    let size: CGFloat
+    let weight: Font.Weight
+    let design: Font.Design
+    @Environment(\.uiScale) private var scale
+
+    func body(content: Content) -> some View {
+        content.font(.system(size: size * scale, weight: weight, design: design))
     }
 }
 

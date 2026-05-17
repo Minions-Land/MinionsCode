@@ -45,6 +45,11 @@ final class TerminalSession: @unchecked Sendable {
         terminalView.send(txt: "claude\n")
     }
 
+    func terminate() {
+        terminalView.process.terminate()
+        isRunning = false
+    }
+
     static func applyDefaultTheme(to terminal: LocalProcessTerminalView) {
         terminal.font = NSFont(name: "MesloLGS NF", size: AppSettings.shared.fontSize)
             ?? NSFont(name: "JetBrains Mono", size: AppSettings.shared.fontSize)
