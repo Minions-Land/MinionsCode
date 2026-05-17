@@ -96,13 +96,16 @@ struct ContentView: View {
 
     private var rootContent: some View {
         VStack(spacing: 0) {
-            // Auto-hide the tab strip in fullscreen — the OS title bar is already
-            // hidden, so this row should be too. Mouse hover at the very top brings
-            // the title bar back via AppKit; we leave the tab strip out for clean
-            // immersion.
-            if !isFullscreen {
-                tabBar
-            }
+            // Two distinct rows, Terminal.app-style:
+            //   row 1: title bar — shares its 38pt strip with the traffic
+            //          lights (or is left-flush in fullscreen), holds every
+            //          chrome control.
+            //   row 2: tab strip — tabs + new-tab button only.
+            // Both rows persist in fullscreen so the user keeps access to
+            // Editing / CD / Run Claude / stats / settings / sidebar even
+            // after the OS hides its own title bar.
+            titleRow
+            tabsRow
             HStack(spacing: 0) {
                 terminalPanel
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -114,8 +117,8 @@ struct ContentView: View {
                 }
             }
         }
-        // Push the tabBar into the title-bar row so the traffic lights and our
-        // controls share a single 38pt strip. fullSizeContentView lets us draw
+        // Push titleRow into the title-bar strip so the traffic lights and our
+        // controls share a single 38pt row. fullSizeContentView lets us draw
         // there; ignoresSafeArea(.container, edges: .top) is what actually
         // moves SwiftUI content up past the safe area inset.
         .ignoresSafeArea(.container, edges: .top)
@@ -493,17 +496,15 @@ struct ContentView: View {
         }
     }
 
-    private var tabBar: some View {
+    /// Row 1 — title bar. Shares its 38pt strip with the traffic lights (which
+    /// are drawn by AppKit on top of our content). In fullscreen the OS hides
+    /// the traffic lights, so we drop the leading reservation and let the
+    /// MinionDot sit flush-left.
+    private var titleRow: some View {
         HStack(spacing: 10) {
-            // Identity dot — sized + positioned to be the fourth equidistant
-            // circle next to the traffic lights (close/min/max are 12pt at
-            // x=20/40/60, so the 4th center sits at x=80 → leading pad 74 with
-            // a 12pt dot lands its center exactly there).
             MinionDot(size: 12)
 
-            // LEFT cluster — per-tab tools. Edit toggle (or read-only badge in
-            // watch mode) and CD button. These are the only capsule-styled
-            // buttons in this row, by user request.
+            // LEFT cluster — per-tab tools.
             if let terminal = activeTerminal {
                 if terminal.mode.isWatch {
                     HStack(spacing: 3) {
@@ -517,49 +518,14 @@ struct ContentView: View {
                     ReadOnlyToggle(terminal: terminal)
                 }
                 CdFolderButton(terminal: terminal)
-            }
-
-            // MIDDLE — tab chips. Takes all remaining horizontal space, and
-            // scrolls when there are too many tabs to fit.
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 4) {
-                    ForEach(orderedTerminalIds, id: \.self) { tid in
-                        if let terminal = terminals[tid] {
-                            TabChip(
-                                terminal: terminal,
-                                sessionName: nameForTerminal(terminal),
-                                isActive: activeTerminalId == tid,
-                                onSelect: {
-                                    if activeTerminalId != tid {
-                                        activeTerminalId = tid
-                                        terminal.activate()
-                                    }
-                                },
-                                onClose: { closeTerminal(tid) }
-                            )
-                        }
-                    }
-                    // New-tab "+" sits at the end of the tab strip — feels
-                    // like a Safari/Chrome-style new-tab affordance and uses
-                    // bare SF symbol styling to stay quiet.
-                    Button(action: newShellSession) {
-                        Image(systemName: "plus")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundColor(TEXT_DIM)
-                            .frame(width: 22, height: 22)
-                    }
-                    .buttonStyle(.plain)
-                    .help("New shell tab (⌘T)")
-                    .keyboardShortcut("t")
+                if case .shell = terminal.mode {
+                    ClaudeLaunchMenu(terminal: terminal)
                 }
-                .padding(.vertical, 6)
             }
-            .frame(maxWidth: .infinity)
 
-            // RIGHT cluster — Run Claude, stats trio, ⋯, ⚙.
-            if let terminal = activeTerminal, case .shell = terminal.mode {
-                ClaudeLaunchMenu(terminal: terminal)
-            }
+            Spacer()
+
+            // RIGHT cluster — stats trio + ⋯ + ⚙ + sidebar toggle.
             HStack(spacing: 12) {
                 plainStat(label: "active", value: "\(manager.activeSessions)", tint: GOLD)
                 plainStat(label: "tracked", value: "\(manager.sessions.count)", tint: TEXT_DIM)
@@ -600,8 +566,6 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
 
-            // Sidebar toggle stays as the rightmost affordance — bare SF symbol
-            // to match the ⋯/⚙ pair to its left.
             Button {
                 NotificationCenter.default.post(name: .toggleSidebar, object: nil)
             } label: {
@@ -616,6 +580,45 @@ struct ContentView: View {
         .padding(.leading, isFullscreen ? 14 : 74)
         .padding(.trailing, 14)
         .frame(height: 38)
+        .background(BG_DARKEST.opacity(settings.translucentBackground ? CHROME_TOP_ALPHA : 1))
+    }
+
+    /// Row 2 — tabs only, à la Terminal.app. Trailing `+` adds a new shell tab.
+    private var tabsRow: some View {
+        HStack(spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    ForEach(orderedTerminalIds, id: \.self) { tid in
+                        if let terminal = terminals[tid] {
+                            TabChip(
+                                terminal: terminal,
+                                sessionName: nameForTerminal(terminal),
+                                isActive: activeTerminalId == tid,
+                                onSelect: {
+                                    if activeTerminalId != tid {
+                                        activeTerminalId = tid
+                                        terminal.activate()
+                                    }
+                                },
+                                onClose: { closeTerminal(tid) }
+                            )
+                        }
+                    }
+                    Button(action: newShellSession) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(TEXT_DIM)
+                            .frame(width: 22, height: 22)
+                    }
+                    .buttonStyle(.plain)
+                    .help("New shell tab (⌘T)")
+                    .keyboardShortcut("t")
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+            }
+        }
+        .frame(height: 32)
         .background(BG_DARKEST.opacity(settings.translucentBackground ? CHROME_MID_ALPHA : 1))
     }
 
