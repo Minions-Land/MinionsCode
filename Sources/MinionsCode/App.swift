@@ -10,6 +10,7 @@ struct MinionsCodeApp: App {
                 .frame(minWidth: 1000, minHeight: 650)
         }
         .windowStyle(.hiddenTitleBar)
+        .windowToolbarStyle(.unifiedCompact(showsTitle: false))
         .defaultSize(width: 1280, height: 780)
         .commands {
             CommandGroup(replacing: .newItem) {

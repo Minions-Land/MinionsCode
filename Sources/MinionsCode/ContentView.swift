@@ -34,143 +34,100 @@ struct ContentView: View {
     @State private var showingCloseConfirm = false
     @State private var pendingCloseId: String?
     @State private var modelFilter: ModelFamilyFilter = .all
-    @State private var isFullscreen: Bool = false
-    @State private var titleRowHovered: Bool = false
 
     private var sidebarTargetWidth: CGFloat {
         sidebarCollapsed ? 0 : sidebarWidth
     }
 
     var body: some View {
-        ZStack(alignment: .top) {
-            VStack(spacing: 0) {
-                // Reserve space for the title row when it's visible. In fullscreen
-                // it auto-hides and the row floats over the content on hover.
-                if !isFullscreen {
-                    titleRow
-                }
-                HStack(spacing: 8) {
-                    // Terminal panel takes priority — fills available space
-                    terminalPanel
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .strokeBorder(Color.white.opacity(0.06), lineWidth: 0.5)
-                        )
-
-                    if !sidebarCollapsed {
-                        SidebarResizer(width: $sidebarWidth)
-                        sidebar
-                            .frame(width: sidebarWidth)
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    .strokeBorder(Color.white.opacity(0.06), lineWidth: 0.5)
-                            )
-                            .transition(.move(edge: .trailing))
+        rootContent
+            .toolbar { titleBarToolbar }
+            .background(rootBackground)
+            .preferredColorScheme(.dark)
+            .environment(\.uiScale, settings.fontSize / 13.0)
+            .onAppear(perform: handleOnAppear)
+            .onChange(of: settings.theme) { _, _ in reapplyTheme() }
+            .onChange(of: settings.fontSize) { _, _ in reapplyTheme() }
+            .onChange(of: settings.translucentBackground) { _, _ in
+                applyWindowTranslucency()
+                reapplyTheme()
+            }
+            .modifier(GlobalNotifications(
+                newShell: newShellSession,
+                toggleSidebar: { withAnimation(.easeInOut(duration: 0.2)) { sidebarCollapsed.toggle() } },
+                closeActive: { if let tid = activeTerminalId { closeTerminal(tid) } },
+                zoomIn: { settings.fontSize = min(22, settings.fontSize + 1) },
+                zoomOut: { settings.fontSize = max(9, settings.fontSize - 1) },
+                zoomReset: { settings.fontSize = 13 },
+                selectTab: { i in
+                    if i >= 0 && i < orderedTerminalIds.count {
+                        let tid = orderedTerminalIds[i]
+                        activeTerminalId = tid
+                        terminals[tid]?.activate()
                     }
-                }
-                .padding(.horizontal, 8)
-                .padding(.bottom, 8)
-            }
-            // 4pt invisible hover strip at the very top — nudges the title row to
-            // slide down in fullscreen when the cursor approaches the edge.
-            if isFullscreen {
-                Color.clear
-                    .frame(height: 4)
-                    .frame(maxWidth: .infinity)
-                    .contentShape(Rectangle())
-                    .onHover { titleRowHovered = $0 }
-                if titleRowHovered {
-                    titleRow
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                        .onHover { titleRowHovered = $0 }
+                },
+                nextTab: { switchTab(offset: 1) },
+                prevTab: { switchTab(offset: -1) }
+            ))
+            .sheet(isPresented: $showingSettings) { SettingsSheet(isPresented: $showingSettings) }
+            .alert("Close this tab?", isPresented: $showingCloseConfirm, presenting: pendingCloseId, actions: closeAlertActions, message: closeAlertMessage)
+            .accentColor(GOLD)
+            .tint(GOLD)
+    }
+
+    @ViewBuilder
+    private func closeAlertActions(_ id: String) -> some View {
+        Button("Cancel", role: .cancel) { pendingCloseId = nil }
+        Button("Close", role: .destructive) {
+            if let id = pendingCloseId { reallyCloseTerminal(id) }
+            pendingCloseId = nil
+        }
+        .keyboardShortcut(.defaultAction)
+    }
+
+    private func closeAlertMessage(_ id: String) -> Text {
+        Text("This terminal has a process running. Closing will terminate it.")
+    }
+
+    private var rootContent: some View {
+        VStack(spacing: 0) {
+            tabBar
+            HStack(spacing: 0) {
+                terminalPanel
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if !sidebarCollapsed {
+                    SidebarResizer(width: $sidebarWidth)
+                    sidebar
+                        .frame(width: sidebarWidth)
+                        .transition(.move(edge: .trailing))
                 }
             }
         }
-        .animation(.easeInOut(duration: 0.18), value: titleRowHovered)
-        .background(
+    }
+
+    @ViewBuilder
+    private var rootBackground: some View {
+        if settings.translucentBackground {
             ZStack {
-                if settings.translucentBackground {
-                    VisualEffectBackground(material: .hudWindow, blendingMode: .behindWindow)
-                    BG_DARKEST.opacity(0.20)
-                } else {
-                    BG_DARKEST
-                }
+                VisualEffectBackground(material: .hudWindow, blendingMode: .behindWindow)
+                BG_DARKEST.opacity(0.20)
             }
-        )
-        .preferredColorScheme(.dark)
-        .environment(\.uiScale, settings.fontSize / 13.0)
-        .onAppear {
-            manager.startPolling()
-            NSApp.activate(ignoringOtherApps: true)
-            applyWindowTranslucency()
-            observeFullscreen()
-            if terminals.isEmpty { newShellSession() }
+        } else {
+            BG_DARKEST
         }
-        .onChange(of: settings.theme) { _, _ in
-            for t in terminals.values {
-                TerminalSession.applyDefaultTheme(to: t.terminalView)
-            }
+    }
+
+    private func handleOnAppear() {
+        manager.startPolling()
+        NSApp.activate(ignoringOtherApps: true)
+        applyWindowTranslucency()
+        if terminals.isEmpty { newShellSession() }
+    }
+
+    private func reapplyTheme() {
+        for t in terminals.values {
+            TerminalSession.applyDefaultTheme(to: t.terminalView)
         }
-        .onChange(of: settings.fontSize) { _, _ in
-            for t in terminals.values {
-                TerminalSession.applyDefaultTheme(to: t.terminalView)
-            }
-        }
-        .onChange(of: settings.translucentBackground) { _, _ in
-            applyWindowTranslucency()
-            for t in terminals.values {
-                TerminalSession.applyDefaultTheme(to: t.terminalView)
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .newSession)) { _ in
-            newShellSession()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .toggleSidebar)) { _ in
-            withAnimation(.easeInOut(duration: 0.2)) { sidebarCollapsed.toggle() }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .closeActiveTab)) { _ in
-            if let tid = activeTerminalId { closeTerminal(tid) }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .zoomIn)) { _ in
-            settings.fontSize = min(22, settings.fontSize + 1)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .zoomOut)) { _ in
-            settings.fontSize = max(9, settings.fontSize - 1)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .zoomReset)) { _ in
-            settings.fontSize = 13
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .selectTab)) { note in
-            if let i = note.object as? Int, i >= 0 && i < orderedTerminalIds.count {
-                let tid = orderedTerminalIds[i]
-                activeTerminalId = tid
-                terminals[tid]?.activate()
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .nextTab)) { _ in
-            switchTab(offset: 1)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .prevTab)) { _ in
-            switchTab(offset: -1)
-        }
-        .sheet(isPresented: $showingSettings) {
-            SettingsSheet(isPresented: $showingSettings)
-        }
-        .alert("Close this tab?", isPresented: $showingCloseConfirm, presenting: pendingCloseId) { id in
-            Button("Cancel", role: .cancel) { pendingCloseId = nil }
-            Button("Close", role: .destructive) {
-                if let id = pendingCloseId { reallyCloseTerminal(id) }
-                pendingCloseId = nil
-            }
-            .keyboardShortcut(.defaultAction)
-        } message: { _ in
-            Text("This terminal has a process running. Closing will terminate it.")
-        }
-        .accentColor(GOLD)
-        .tint(GOLD)
     }
 
     private func switchTab(offset: Int) {
@@ -199,42 +156,73 @@ struct ContentView: View {
         }
     }
 
-    /// Observe NSWindow enter/leave fullscreen so the title row can auto-hide and
-    /// reveal on hover when the user maximises the window.
-    private func observeFullscreen() {
-        guard let window = NSApp.windows.first else { return }
-        isFullscreen = window.styleMask.contains(.fullScreen)
-        let nc = NotificationCenter.default
-        nc.addObserver(forName: NSWindow.didEnterFullScreenNotification, object: window, queue: .main) { _ in
-            Task { @MainActor in self.isFullscreen = true }
+    // MARK: - Native title-bar toolbar
+    //
+    // Lives in the actual NSWindow titlebar via `.toolbar` + `unifiedCompact`,
+    // so AppKit handles fullscreen auto-hide for us. Layout:
+    //   [traffic lights] [MinionDot] [name·mode·tools] ········ [stats][menu][gear]
+
+    @ToolbarContentBuilder
+    private var titleBarToolbar: some ToolbarContent {
+        // Identity — sits as the fourth circle right after the three traffic lights.
+        ToolbarItem(placement: .navigation) {
+            MinionDot(size: 12)
         }
-        nc.addObserver(forName: NSWindow.didExitFullScreenNotification, object: window, queue: .main) { _ in
-            Task { @MainActor in self.isFullscreen = false }
+
+        ToolbarItem(placement: .navigation) {
+            activeTerminalToolbarItems
+        }
+
+        ToolbarItem(placement: .primaryAction) {
+            HStack(spacing: 10) {
+                statusBadge(label: "active", value: "\(manager.activeSessions)", tint: GOLD)
+                statusBadge(label: "tracked", value: "\(manager.sessions.count)", tint: TEXT_DIM)
+                statusBadge(label: "spent", value: fmtCost(manager.totalCost), tint: Color.orange)
+            }
+        }
+
+        ToolbarItem(placement: .primaryAction) {
+            Menu {
+                Button("Delete junk sessions (tmp / empty)") {
+                    let n = manager.deleteJunkSessions()
+                    if n > 0 { manager.scan() }
+                }
+                Button("Delete empty tabs") { deleteEmptySessions() }
+                Divider()
+                Button("Auto-name unnamed Opus sessions") {
+                    Task {
+                        await manager.autoNameUnnamedSessions { s in
+                            (s.model?.lowercased().contains("opus")) ?? false
+                        }
+                    }
+                }
+                Button("Auto-name all unnamed sessions") {
+                    Task { await manager.autoNameUnnamedSessions() }
+                }
+                Divider()
+                Button("Refresh now") { manager.scan() }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .menuIndicator(.hidden)
+        }
+
+        ToolbarItem(placement: .primaryAction) {
+            Button { showingSettings = true } label: {
+                Image(systemName: "gearshape")
+            }
         }
     }
 
-    // MARK: - Title row (single unified bar on the traffic-light row)
-
-    /// One row that sits in the same band as close/min/max. Contains the
-    /// active terminal's tools (read-only, cd, run claude), aggregate stats,
-    /// session menu, settings, and the MinionDot identity. Auto-hides in
-    /// fullscreen and reveals on hover.
-    private var titleRow: some View {
-        let activeTerminal = activeTerminalId.flatMap { terminals[$0] }
-        let activeSession = activeTerminal?.mode.sessionId.flatMap { sid in
-            manager.sessions.first { $0.sessionId == sid }
-        }
-        let isWatch = activeTerminal?.mode.isWatch ?? false
-
-        return HStack(spacing: 12) {
-            // Match the spacing the three traffic lights need (~70pt) so this row
-            // visually starts after them.
-            Color.clear.frame(width: 70, height: 1)
-
-            // Per-tab tools: name, mode badge, ReadOnly/CD or watch indicator,
-            // and Run Claude when the tab is a shell.
-            if let terminal = activeTerminal {
-                Text(activeSession?.name ?? terminal.mode.label)
+    @ViewBuilder
+    private var activeTerminalToolbarItems: some View {
+        if let tid = activeTerminalId, let terminal = terminals[tid] {
+            let session = terminal.mode.sessionId.flatMap { sid in
+                manager.sessions.first { $0.sessionId == sid }
+            }
+            let isWatch = terminal.mode.isWatch
+            HStack(spacing: 8) {
+                Text(session?.name ?? terminal.mode.label)
                     .font(.system(size: 12, weight: .semibold, design: .monospaced))
                     .foregroundColor(TEXT_PRIMARY)
                     .lineLimit(1)
@@ -258,64 +246,12 @@ struct ContentView: View {
                 if case .shell = terminal.mode {
                     ClaudeLaunchMenu(terminal: terminal)
                 }
-                if let s = activeSession {
+                if let s = session {
                     Pill(label: "In", value: fmtTokens(s.usage.totalInput), color: GOLD)
                     Pill(label: "$", value: fmtCost(s.cost), color: Color.orange)
                 }
             }
-
-            Spacer(minLength: 8)
-
-            // Aggregate stats
-            HStack(spacing: 10) {
-                statusBadge(label: "active", value: "\(manager.activeSessions)", tint: GOLD)
-                statusBadge(label: "tracked", value: "\(manager.sessions.count)", tint: TEXT_DIM)
-                statusBadge(label: "spent", value: fmtCost(manager.totalCost), tint: Color.orange)
-            }
-
-            // Sessions menu (was in sidebarHeader)
-            Menu {
-                Button("Delete junk sessions (tmp / empty)") {
-                    let n = manager.deleteJunkSessions()
-                    if n > 0 { manager.scan() }
-                }
-                Button("Delete empty tabs") { deleteEmptySessions() }
-                Divider()
-                Button("Auto-name unnamed Opus sessions") {
-                    Task {
-                        await manager.autoNameUnnamedSessions { s in
-                            (s.model?.lowercased().contains("opus")) ?? false
-                        }
-                    }
-                }
-                Button("Auto-name all unnamed sessions") {
-                    Task { await manager.autoNameUnnamedSessions() }
-                }
-                Divider()
-                Button("Refresh now") { manager.scan() }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-                    .font(.system(size: 13))
-                    .foregroundColor(TEXT_DIM)
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-
-            Button { showingSettings = true } label: {
-                Image(systemName: "gearshape.fill")
-                    .font(.system(size: 13))
-                    .foregroundColor(TEXT_DIM)
-            }
-            .buttonStyle(.plain)
-
-            // Identity dot — same diameter as a traffic light so the row looks
-            // balanced left-to-right.
-            MinionDot(size: 14)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(BG_DARKEST.opacity(settings.translucentBackground ? CHROME_TOP_ALPHA : 1))
     }
 
     // MARK: - Sidebar
@@ -560,36 +496,32 @@ struct ContentView: View {
     // MARK: - Terminal Panel
 
     private var terminalPanel: some View {
-        VStack(spacing: 0) {
-            tabBar
-            ZStack {
-                if let tid = activeTerminalId, let terminal = terminals[tid] {
-                    IsolatedTerminalView(terminal: terminal)
-                        .id(tid)
-                        .padding(.horizontal, 10)
-                        .padding(.bottom, 6)
-                        .background(
-                            // Uniform tint behind both cells and padding margin —
-                            // see TerminalSession.applyDefaultTheme for why cell
-                            // backgrounds are transparent in translucent mode.
-                            Color(settings.theme.background)
-                                .opacity(settings.translucentBackground ? 0.18 : 1)
-                        )
-                } else {
-                    emptyState
-                }
-                ReadOnlyToastOverlay(
-                    activeTerminalId: activeTerminalId,
-                    isWatchMode: activeTerminalId.flatMap { terminals[$0]?.mode.isWatch } ?? false,
-                    onEnableEditing: {
-                        if let tid = activeTerminalId, let t = terminals[tid] {
-                            t.setReadOnly(false)
-                        }
-                    }
-                )
+        ZStack {
+            if let tid = activeTerminalId, let terminal = terminals[tid] {
+                IsolatedTerminalView(terminal: terminal)
+                    .id(tid)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 6)
+                    .background(
+                        // Same chrome tint as everything else — no second color
+                        // for the padding margin. Terminal cells are transparent
+                        // in translucent mode (see TerminalSession.applyDefaultTheme).
+                        BG_DARKEST.opacity(settings.translucentBackground ? CHROME_MID_ALPHA : 1)
+                    )
+            } else {
+                emptyState
             }
+            ReadOnlyToastOverlay(
+                activeTerminalId: activeTerminalId,
+                isWatchMode: activeTerminalId.flatMap { terminals[$0]?.mode.isWatch } ?? false,
+                onEnableEditing: {
+                    if let tid = activeTerminalId, let t = terminals[tid] {
+                        t.setReadOnly(false)
+                    }
+                }
+            )
         }
-        .background(BG_DARKEST.opacity(settings.translucentBackground ? 0 : 1))
+        .background(BG_DARKEST.opacity(settings.translucentBackground ? CHROME_MID_ALPHA : 1))
     }
 
     private func statusBadge(label: String, value: String, tint: Color) -> some View {
@@ -1652,6 +1584,35 @@ struct SettingsSheet: View {
         .frame(width: 420, height: 360)
         .background(BG_DARK)
         .preferredColorScheme(.dark)
+    }
+}
+
+/// Bundles all the NotificationCenter subscriptions into one ViewModifier so the
+/// ContentView body stays small enough for SwiftUI's type-checker to keep up.
+struct GlobalNotifications: ViewModifier {
+    let newShell: () -> Void
+    let toggleSidebar: () -> Void
+    let closeActive: () -> Void
+    let zoomIn: () -> Void
+    let zoomOut: () -> Void
+    let zoomReset: () -> Void
+    let selectTab: (Int) -> Void
+    let nextTab: () -> Void
+    let prevTab: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: .newSession)) { _ in newShell() }
+            .onReceive(NotificationCenter.default.publisher(for: .toggleSidebar)) { _ in toggleSidebar() }
+            .onReceive(NotificationCenter.default.publisher(for: .closeActiveTab)) { _ in closeActive() }
+            .onReceive(NotificationCenter.default.publisher(for: .zoomIn)) { _ in zoomIn() }
+            .onReceive(NotificationCenter.default.publisher(for: .zoomOut)) { _ in zoomOut() }
+            .onReceive(NotificationCenter.default.publisher(for: .zoomReset)) { _ in zoomReset() }
+            .onReceive(NotificationCenter.default.publisher(for: .selectTab)) { note in
+                if let i = note.object as? Int { selectTab(i) }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .nextTab)) { _ in nextTab() }
+            .onReceive(NotificationCenter.default.publisher(for: .prevTab)) { _ in prevTab() }
     }
 }
 
