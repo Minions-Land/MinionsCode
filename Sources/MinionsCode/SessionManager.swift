@@ -77,6 +77,7 @@ final class SessionManager {
         }
 
         sessions = result.sorted { ($0.isAlive ? 0 : 1, -$0.cost) < ($1.isAlive ? 0 : 1, -$1.cost) }
+        NotificationManager.shared.observe(sessions: sessions)
     }
 
     func renameSession(_ id: String, to name: String) {

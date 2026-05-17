@@ -4,6 +4,9 @@
 *.xcodeproj/
 DerivedData/
 
+# Iconset (regenerated from script)
+Resources/AppIcon.iconset/
+
 # macOS
 .DS_Store
 *.swp

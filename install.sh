@@ -15,6 +15,10 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 
 cp .build/release/MinionsCode "$APP_BUNDLE/Contents/MacOS/"
 
+if [ -f "Resources/AppIcon.icns" ]; then
+    cp Resources/AppIcon.icns "$APP_BUNDLE/Contents/Resources/"
+fi
+
 cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -30,6 +34,8 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
     <string>1.0.0</string>
     <key>CFBundleShortVersionString</key>
     <string>1.0.0</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>
