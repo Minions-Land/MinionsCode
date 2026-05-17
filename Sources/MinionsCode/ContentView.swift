@@ -34,25 +34,62 @@ struct ContentView: View {
     @State private var showingCloseConfirm = false
     @State private var pendingCloseId: String?
     @State private var modelFilter: ModelFamilyFilter = .all
+    @State private var isFullscreen: Bool = false
+    @State private var titleRowHovered: Bool = false
 
     private var sidebarTargetWidth: CGFloat {
         sidebarCollapsed ? 0 : sidebarWidth
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            // Terminal panel takes priority — fills available space
-            terminalPanel
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        ZStack(alignment: .top) {
+            VStack(spacing: 0) {
+                // Reserve space for the title row when it's visible. In fullscreen
+                // it auto-hides and the row floats over the content on hover.
+                if !isFullscreen {
+                    titleRow
+                }
+                HStack(spacing: 8) {
+                    // Terminal panel takes priority — fills available space
+                    terminalPanel
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .strokeBorder(Color.white.opacity(0.06), lineWidth: 0.5)
+                        )
 
-            if !sidebarCollapsed {
-                Divider().background(Color.white.opacity(0.05))
-                SidebarResizer(width: $sidebarWidth)
-                sidebar
-                    .frame(width: sidebarWidth)
-                    .transition(.move(edge: .trailing))
+                    if !sidebarCollapsed {
+                        SidebarResizer(width: $sidebarWidth)
+                        sidebar
+                            .frame(width: sidebarWidth)
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .strokeBorder(Color.white.opacity(0.06), lineWidth: 0.5)
+                            )
+                            .transition(.move(edge: .trailing))
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.bottom, 8)
+            }
+            // 4pt invisible hover strip at the very top — nudges the title row to
+            // slide down in fullscreen when the cursor approaches the edge.
+            if isFullscreen {
+                Color.clear
+                    .frame(height: 4)
+                    .frame(maxWidth: .infinity)
+                    .contentShape(Rectangle())
+                    .onHover { titleRowHovered = $0 }
+                if titleRowHovered {
+                    titleRow
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                        .onHover { titleRowHovered = $0 }
+                }
             }
         }
+        .animation(.easeInOut(duration: 0.18), value: titleRowHovered)
         .background(
             ZStack {
                 if settings.translucentBackground {
@@ -69,6 +106,7 @@ struct ContentView: View {
             manager.startPolling()
             NSApp.activate(ignoringOtherApps: true)
             applyWindowTranslucency()
+            observeFullscreen()
             if terminals.isEmpty { newShellSession() }
         }
         .onChange(of: settings.theme) { _, _ in
@@ -161,12 +199,129 @@ struct ContentView: View {
         }
     }
 
+    /// Observe NSWindow enter/leave fullscreen so the title row can auto-hide and
+    /// reveal on hover when the user maximises the window.
+    private func observeFullscreen() {
+        guard let window = NSApp.windows.first else { return }
+        isFullscreen = window.styleMask.contains(.fullScreen)
+        let nc = NotificationCenter.default
+        nc.addObserver(forName: NSWindow.didEnterFullScreenNotification, object: window, queue: .main) { _ in
+            Task { @MainActor in self.isFullscreen = true }
+        }
+        nc.addObserver(forName: NSWindow.didExitFullScreenNotification, object: window, queue: .main) { _ in
+            Task { @MainActor in self.isFullscreen = false }
+        }
+    }
+
+    // MARK: - Title row (single unified bar on the traffic-light row)
+
+    /// One row that sits in the same band as close/min/max. Contains the
+    /// active terminal's tools (read-only, cd, run claude), aggregate stats,
+    /// session menu, settings, and the MinionDot identity. Auto-hides in
+    /// fullscreen and reveals on hover.
+    private var titleRow: some View {
+        let activeTerminal = activeTerminalId.flatMap { terminals[$0] }
+        let activeSession = activeTerminal?.mode.sessionId.flatMap { sid in
+            manager.sessions.first { $0.sessionId == sid }
+        }
+        let isWatch = activeTerminal?.mode.isWatch ?? false
+
+        return HStack(spacing: 12) {
+            // Match the spacing the three traffic lights need (~70pt) so this row
+            // visually starts after them.
+            Color.clear.frame(width: 70, height: 1)
+
+            // Per-tab tools: name, mode badge, ReadOnly/CD or watch indicator,
+            // and Run Claude when the tab is a shell.
+            if let terminal = activeTerminal {
+                Text(activeSession?.name ?? terminal.mode.label)
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .foregroundColor(TEXT_PRIMARY)
+                    .lineLimit(1)
+                Text(terminal.mode.label)
+                    .font(.system(size: 9, weight: .bold))
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Capsule().fill((isWatch ? Color.green : GOLD).opacity(0.15)))
+                    .foregroundColor(isWatch ? Color.green : GOLD)
+                if isWatch {
+                    HStack(spacing: 4) {
+                        Image(systemName: "eye.fill").font(.system(size: 9))
+                        Text("read-only").font(.system(size: 10, weight: .semibold))
+                    }
+                    .foregroundColor(Color.green.opacity(0.85))
+                    .padding(.horizontal, 7).padding(.vertical, 3)
+                    .background(Capsule().fill(Color.green.opacity(0.12)))
+                } else {
+                    ReadOnlyToggle(terminal: terminal)
+                    CdFolderButton(terminal: terminal)
+                }
+                if case .shell = terminal.mode {
+                    ClaudeLaunchMenu(terminal: terminal)
+                }
+                if let s = activeSession {
+                    Pill(label: "In", value: fmtTokens(s.usage.totalInput), color: GOLD)
+                    Pill(label: "$", value: fmtCost(s.cost), color: Color.orange)
+                }
+            }
+
+            Spacer(minLength: 8)
+
+            // Aggregate stats
+            HStack(spacing: 10) {
+                statusBadge(label: "active", value: "\(manager.activeSessions)", tint: GOLD)
+                statusBadge(label: "tracked", value: "\(manager.sessions.count)", tint: TEXT_DIM)
+                statusBadge(label: "spent", value: fmtCost(manager.totalCost), tint: Color.orange)
+            }
+
+            // Sessions menu (was in sidebarHeader)
+            Menu {
+                Button("Delete junk sessions (tmp / empty)") {
+                    let n = manager.deleteJunkSessions()
+                    if n > 0 { manager.scan() }
+                }
+                Button("Delete empty tabs") { deleteEmptySessions() }
+                Divider()
+                Button("Auto-name unnamed Opus sessions") {
+                    Task {
+                        await manager.autoNameUnnamedSessions { s in
+                            (s.model?.lowercased().contains("opus")) ?? false
+                        }
+                    }
+                }
+                Button("Auto-name all unnamed sessions") {
+                    Task { await manager.autoNameUnnamedSessions() }
+                }
+                Divider()
+                Button("Refresh now") { manager.scan() }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 13))
+                    .foregroundColor(TEXT_DIM)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+
+            Button { showingSettings = true } label: {
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 13))
+                    .foregroundColor(TEXT_DIM)
+            }
+            .buttonStyle(.plain)
+
+            // Identity dot — same diameter as a traffic light so the row looks
+            // balanced left-to-right.
+            MinionDot(size: 14)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(BG_DARKEST.opacity(settings.translucentBackground ? CHROME_TOP_ALPHA : 1))
+    }
+
     // MARK: - Sidebar
 
     private var sidebar: some View {
         VStack(spacing: 0) {
-            sidebarHeader
-            Divider().background(Color.white.opacity(0.05))
             searchBar
             Divider().background(Color.white.opacity(0.05))
             filterBar
@@ -241,7 +396,7 @@ struct ContentView: View {
                 .disabled(searchText.isEmpty)
             }
             .padding(.horizontal, 10).padding(.vertical, 6)
-            .background(RoundedRectangle(cornerRadius: 6).fill(BG_MID))
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(BG_MID))
 
             if let hint = aiSearchHint {
                 HStack(spacing: 4) {
@@ -299,57 +454,6 @@ struct ContentView: View {
                 aiSearchHint = result.explanation ?? "No match found."
             }
         }
-    }
-
-    private var sidebarHeader: some View {
-        HStack(spacing: 8) {
-            MinionDot(size: 14)
-            Text("Sessions")
-                .font(.system(size: 13, weight: .heavy))
-                .foregroundColor(TEXT_PRIMARY)
-                .tracking(0.3)
-            Spacer()
-            Menu {
-                Button("Delete junk sessions (tmp / empty)") {
-                    let n = manager.deleteJunkSessions()
-                    if n > 0 { manager.scan() }
-                }
-                Button("Delete empty tabs") { deleteEmptySessions() }
-                Divider()
-                Button("Auto-name unnamed Opus sessions") {
-                    Task {
-                        await manager.autoNameUnnamedSessions { s in
-                            (s.model?.lowercased().contains("opus")) ?? false
-                        }
-                    }
-                }
-                Button("Auto-name all unnamed sessions") {
-                    Task {
-                        await manager.autoNameUnnamedSessions()
-                    }
-                }
-                Divider()
-                Button("Refresh now") { manager.scan() }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-                    .font(.system(size: 13))
-                    .foregroundColor(TEXT_DIM)
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-
-            Button { showingSettings = true } label: {
-                Image(systemName: "gearshape.fill")
-                    .font(.system(size: 14))
-                    .foregroundColor(TEXT_DIM)
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
-        // Top tier — same alpha as statusStrip for a continuous title-bar row.
-        .background(BG_DARKEST.opacity(settings.translucentBackground ? CHROME_TOP_ALPHA : 0))
     }
 
     private var globalStats: some View {
@@ -457,24 +561,20 @@ struct ContentView: View {
 
     private var terminalPanel: some View {
         VStack(spacing: 0) {
-            statusStrip
             tabBar
             ZStack {
                 if let tid = activeTerminalId, let terminal = terminals[tid] {
-                    VStack(spacing: 0) {
-                        terminalToolbar(for: tid, terminal: terminal)
-                        IsolatedTerminalView(terminal: terminal)
-                            .id(tid)
-                            .padding(.horizontal, 10)
-                            .padding(.bottom, 6)
-                            .background(
-                                // Uniform tint behind both cells and padding margin —
-                                // see TerminalSession.applyDefaultTheme for why cell
-                                // backgrounds are transparent in translucent mode.
-                                Color(settings.theme.background)
-                                    .opacity(settings.translucentBackground ? 0.18 : 1)
-                            )
-                    }
+                    IsolatedTerminalView(terminal: terminal)
+                        .id(tid)
+                        .padding(.horizontal, 10)
+                        .padding(.bottom, 6)
+                        .background(
+                            // Uniform tint behind both cells and padding margin —
+                            // see TerminalSession.applyDefaultTheme for why cell
+                            // backgrounds are transparent in translucent mode.
+                            Color(settings.theme.background)
+                                .opacity(settings.translucentBackground ? 0.18 : 1)
+                        )
                 } else {
                     emptyState
                 }
@@ -490,30 +590,6 @@ struct ContentView: View {
             }
         }
         .background(BG_DARKEST.opacity(settings.translucentBackground ? 0 : 1))
-    }
-
-    private var statusStrip: some View {
-        HStack(spacing: 12) {
-            HStack(spacing: 6) {
-                MinionDot(size: 14)
-                Text("MinionsCode")
-                    .font(.system(size: 12, weight: .heavy))
-                    .foregroundColor(TEXT_PRIMARY)
-                    .tracking(0.3)
-            }
-            Spacer()
-            HStack(spacing: 10) {
-                statusBadge(label: "active", value: "\(manager.activeSessions)", tint: GOLD)
-                statusBadge(label: "tracked", value: "\(manager.sessions.count)", tint: TEXT_DIM)
-                statusBadge(label: "spent", value: fmtCost(manager.totalCost), tint: Color.orange)
-            }
-        }
-        // Leave 76pt for traffic lights (since hiddenTitleBar overlays them on content).
-        .padding(.leading, 76)
-        .padding(.trailing, 14)
-        .padding(.vertical, 9)
-        // Top tier — anchors the window's first row alongside the traffic lights.
-        .background(BG_DARKEST.opacity(settings.translucentBackground ? CHROME_TOP_ALPHA : 1))
     }
 
     private func statusBadge(label: String, value: String, tint: Color) -> some View {
@@ -557,7 +633,7 @@ struct ContentView: View {
                     Image(systemName: "plus")
                         .font(.system(size: 12, weight: .semibold))
                         .frame(width: 26, height: 26)
-                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.04)))
+                        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.white.opacity(0.04)))
                         .foregroundColor(TEXT_DIM)
                 }
                 .buttonStyle(.plain)
@@ -574,7 +650,7 @@ struct ContentView: View {
                         .font(.system(size: 12, weight: .semibold))
                         .frame(width: 26, height: 26)
                         .background(
-                            RoundedRectangle(cornerRadius: 6)
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
                                 .fill(sidebarCollapsed ? Color.white.opacity(0.04) : GOLD.opacity(0.18))
                         )
                         .foregroundColor(sidebarCollapsed ? TEXT_DIM : GOLD)
@@ -616,51 +692,6 @@ struct ContentView: View {
             activeTerminalId = orderedTerminalIds.last
             if let next = activeTerminalId, let t = terminals[next] { t.activate() }
         }
-    }
-
-    private func terminalToolbar(for id: String, terminal: TerminalSession) -> some View {
-        let session = terminal.mode.sessionId.flatMap { sid in
-            manager.sessions.first { $0.sessionId == sid }
-        }
-        let isWatch = terminal.mode.isWatch
-        return HStack(spacing: 10) {
-            Circle().fill(isWatch ? Color.green : GOLD).frame(width: 6, height: 6)
-            Text(session?.name ?? "Terminal")
-                .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                .foregroundColor(TEXT_PRIMARY)
-                .lineLimit(1)
-            Text(terminal.mode.label)
-                .font(.system(size: 9, weight: .bold))
-                .padding(.horizontal, 6).padding(.vertical, 2)
-                .background(Capsule().fill((isWatch ? Color.green : GOLD).opacity(0.15)))
-                .foregroundColor(isWatch ? Color.green : GOLD)
-
-            if isWatch {
-                HStack(spacing: 4) {
-                    Image(systemName: "eye.fill").font(.system(size: 9))
-                    Text("Watching live · read-only")
-                        .font(.system(size: 10, weight: .semibold))
-                }
-                .foregroundColor(Color.green.opacity(0.85))
-                .padding(.horizontal, 7).padding(.vertical, 3)
-                .background(Capsule().fill(Color.green.opacity(0.12)))
-            } else {
-                ReadOnlyToggle(terminal: terminal)
-                CdFolderButton(terminal: terminal)
-            }
-
-            Spacer()
-            if let s = session {
-                Pill(label: "In", value: fmtTokens(s.usage.totalInput), color: GOLD)
-                Pill(label: "Cache", value: fmtPct(s.cacheHitRate), color: Color.green.opacity(0.85))
-                Pill(label: "$", value: fmtCost(s.cost), color: Color.orange)
-            }
-            if case .shell = terminal.mode {
-                ClaudeLaunchMenu(terminal: terminal)
-            }
-        }
-        .padding(.horizontal, 14).padding(.vertical, 8)
-        .background(BG_DARKEST.opacity(settings.translucentBackground ? CHROME_MID_ALPHA : 1))
     }
 
     private var emptyState: some View {
@@ -1273,10 +1304,10 @@ struct TabChip: View {
         .padding(.vertical, 5)
         .frame(minWidth: 100, maxWidth: 200)
         .background(
-            RoundedRectangle(cornerRadius: 6)
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(isActive ? Color(red: 1.0, green: 0.78, blue: 0.10).opacity(0.12) : Color.white.opacity(0.03))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 6)
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
                         .stroke(isActive ? Color(red: 1.0, green: 0.78, blue: 0.10).opacity(0.4) : Color.clear, lineWidth: 1)
                 )
         )
@@ -1422,7 +1453,7 @@ struct SessionGroup: View {
             .padding(.vertical, 7)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 4)
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .fill(hovering ? Color.white.opacity(0.04) : Color.clear)
             )
             .foregroundColor(.white.opacity(0.55))
@@ -1517,10 +1548,10 @@ struct SessionCard: View {
         }
         .padding(.horizontal, 10).padding(.vertical, 8)
         .background(
-            RoundedRectangle(cornerRadius: 6)
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(isActive ? Color(red: 1.0, green: 0.78, blue: 0.10).opacity(0.08) : Color.white.opacity(0.02))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 6)
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
                         .stroke(isActive ? Color(red: 1.0, green: 0.78, blue: 0.10).opacity(0.4) : Color.clear, lineWidth: 1)
                 )
         )
