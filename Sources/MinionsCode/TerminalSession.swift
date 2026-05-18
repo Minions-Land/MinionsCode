@@ -149,6 +149,9 @@ final class TerminalSession: @unchecked Sendable {
         // switching to a menu) dims the caret — especially noticeable inside
         // Claude Code's readline prompt.
         terminalView.caretViewTracksFocus = false
+        // I-beam (bar) cursor — much easier to read than the default block
+        // which covers the character underneath it.
+        terminalView.terminal.setCursorStyle(.blinkBar)
 
         let env = buildEnv()
         switch mode {
