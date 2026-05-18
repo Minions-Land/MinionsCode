@@ -533,6 +533,14 @@ struct ContentView: View {
                                 },
                                 onClose: { closeTerminal(tid) }
                             )
+                            .onDrag {
+                                NSItemProvider(object: tid as NSString)
+                            }
+                            .onDrop(of: [.text], delegate: TabDropDelegate(
+                                item: tid,
+                                items: $orderedTerminalIds,
+                                activeItem: $activeTerminalId
+                            ))
                         }
                     }
                     Button(action: newShellSession) {
@@ -1350,6 +1358,34 @@ extension String {
         // Wrap in single quotes and escape any embedded single-quotes
         let escaped = self.replacingOccurrences(of: "'", with: "'\\''")
         return "'\(escaped)'"
+    }
+}
+
+/// DropDelegate for tab reordering. When a tab is dragged over another tab,
+/// this swaps their positions in the orderedTerminalIds array.
+struct TabDropDelegate: DropDelegate {
+    let item: String
+    @Binding var items: [String]
+    @Binding var activeItem: String?
+
+    func performDrop(info: DropInfo) -> Bool {
+        return true
+    }
+
+    func dropEntered(info: DropInfo) {
+        guard let draggedItem = info.itemProviders(for: [.text]).first else { return }
+        draggedItem.loadItem(forTypeIdentifier: "public.text", options: nil) { data, _ in
+            guard let data = data as? Data,
+                  let draggedId = String(data: data, encoding: .utf8),
+                  draggedId != item else { return }
+            DispatchQueue.main.async {
+                guard let fromIndex = items.firstIndex(of: draggedId),
+                      let toIndex = items.firstIndex(of: item) else { return }
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    items.move(fromOffsets: IndexSet(integer: fromIndex), toOffset: toIndex > fromIndex ? toIndex + 1 : toIndex)
+                }
+            }
+        }
     }
 }
 
