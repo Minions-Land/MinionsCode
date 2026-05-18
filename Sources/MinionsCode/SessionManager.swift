@@ -1,4 +1,5 @@
 import Foundation
+import CoreServices
 
 extension String {
     var nilIfEmpty: String? { isEmpty ? nil : self }
@@ -13,6 +14,27 @@ struct JsonlCache: Sendable {
     var cwd: String?
 }
 
+/// FSEventStream callback — must be a free function (or pure C closure) so
+/// it carries no actor isolation. Calling it from the FSEvents dispatch
+/// queue would otherwise trip Swift's MainActor assertion. We hop to the
+/// main queue here, then bounce into MainActor land via `Task`.
+private func fsCallback(
+    streamRef: ConstFSEventStreamRef,
+    clientCallBackInfo: UnsafeMutableRawPointer?,
+    numEvents: Int,
+    eventPaths: UnsafeMutableRawPointer,
+    eventFlags: UnsafePointer<FSEventStreamEventFlags>,
+    eventIds: UnsafePointer<FSEventStreamEventId>
+) {
+    guard let info = clientCallBackInfo else { return }
+    let unmanaged = Unmanaged<SessionManager>.fromOpaque(info)
+    DispatchQueue.main.async {
+        MainActor.assumeIsolated {
+            unmanaged.takeUnretainedValue().handleFSEvents()
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class SessionManager {
@@ -23,7 +45,15 @@ final class SessionManager {
     /// True while the deep history scan is running. Sidebar shows a "thinking"
     /// indicator so the user knows results will appear progressively.
     var isLoadingHistory: Bool = false
-    private var timer: Timer?
+    /// Slow safety-net timer — fires every 60s in case FSEvents drops something
+    /// (sleep, network volume, etc.). Real refresh is event-driven via the
+    /// FSEventStream below.
+    private var safetyTimer: Timer?
+    private var fsStream: FSEventStreamRef?
+    /// Debounce token: the most recent FS event schedules this; earlier ones
+    /// get cancelled. Without it a `claude` mid-stream would fire scan() many
+    /// times per second.
+    private var debounceTask: Task<Void, Never>?
     private var customNames: [String: String] = [:]
     nonisolated(unsafe) private static var cache: [String: JsonlCache] = [:]
     nonisolated(unsafe) private static let cacheLock = NSLock()
@@ -45,12 +75,60 @@ final class SessionManager {
     var totalCost: Double { sessions.reduce(0) { $0 + $1.cost } }
     var activeSessions: Int { sessions.filter(\.isAlive).count }
 
-    func startPolling(interval: TimeInterval = 5) {
+    func startPolling(interval: TimeInterval = 60) {
         scan()
-        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+        startFSWatcher()
+        // Slow heartbeat fallback — FSEvents covers ~all real updates, but a
+        // 60s safety net catches edge cases (volume unmount/mount, system
+        // sleep, the rare missed event) without burning CPU like the old 5s
+        // poll did.
+        safetyTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.scan(historyDays: nil) }
         }
     }
+
+    /// Watches `~/.claude/projects/` (where session JSONLs live) and
+    /// `~/.claude/sessions/` (live PID files). Any write inside debounces
+    /// a single scan() ~250ms later — much faster than the old 5s poll, and
+    /// no CPU when nothing's happening.
+    private func startFSWatcher() {
+        if fsStream != nil { return }
+        let projects = claudeDir.appendingPathComponent("projects").path
+        let sessions = claudeDir.appendingPathComponent("sessions").path
+        let paths = [projects, sessions] as CFArray
+
+        var ctx = FSEventStreamContext(
+            version: 0,
+            info: Unmanaged.passUnretained(self).toOpaque(),
+            retain: nil, release: nil, copyDescription: nil
+        )
+        let flags = UInt32(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer)
+        guard let stream = FSEventStreamCreate(
+            kCFAllocatorDefault,
+            fsCallback,
+            &ctx,
+            paths,
+            FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
+            0.2,  // 200ms latency — coalesces bursts of writes
+            flags
+        ) else { return }
+        FSEventStreamSetDispatchQueue(stream, .global(qos: .utility))
+        FSEventStreamStart(stream)
+        self.fsStream = stream
+    }
+
+    /// Called on the main actor whenever FSEvents fires. Debounces — a fresh
+    /// burst of events restarts the timer, so a flurry of writes from a live
+    /// claude session triggers exactly one scan() at the end.
+    fileprivate func handleFSEvents() {
+        debounceTask?.cancel()
+        debounceTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(250))
+            if Task.isCancelled { return }
+            self.scan(historyDays: nil)
+        }
+    }
+
 
     /// Two-phase scan, both async:
     /// - Phase 1 (background, fast): live PIDs + stat-only recent JSONLs.

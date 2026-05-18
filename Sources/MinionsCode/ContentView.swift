@@ -53,6 +53,8 @@ struct ContentView: View {
             .onAppear(perform: handleOnAppear)
             .onChange(of: settings.theme) { _, _ in reapplyTheme() }
             .onChange(of: settings.fontSize) { _, _ in reapplyTheme() }
+            .onChange(of: activeTerminalId) { _, _ in syncChromeBridge() }
+            .onChange(of: sidebarCollapsed) { _, _ in syncChromeBridge() }
             .onChange(of: settings.translucentBackground) { _, _ in
                 applyWindowTranslucency()
                 reapplyTheme()
@@ -96,15 +98,10 @@ struct ContentView: View {
 
     private var rootContent: some View {
         VStack(spacing: 0) {
-            // Two distinct rows, Terminal.app-style:
-            //   row 1: title bar — shares its 38pt strip with the traffic
-            //          lights (or is left-flush in fullscreen), holds every
-            //          chrome control.
-            //   row 2: tab strip — tabs + new-tab button only.
-            // Both rows persist in fullscreen so the user keeps access to
-            // Editing / CD / Run Claude / stats / settings / sidebar even
-            // after the OS hides its own title bar.
-            titleRow
+            // titleRow lives in the NSWindow toolbar (see `.toolbar` modifier
+            // on body) — that way it auto-hides with the traffic lights when
+            // entering fullscreen, and reappears when the user mouses to the
+            // top of the screen, exactly like Apple Terminal.
             tabsRow
             HStack(spacing: 0) {
                 terminalPanel
@@ -117,11 +114,6 @@ struct ContentView: View {
                 }
             }
         }
-        // Push titleRow into the title-bar strip so the traffic lights and our
-        // controls share a single 38pt row. fullSizeContentView lets us draw
-        // there; ignoresSafeArea(.container, edges: .top) is what actually
-        // moves SwiftUI content up past the safe area inset.
-        .ignoresSafeArea(.container, edges: .top)
     }
 
     @ViewBuilder
@@ -144,6 +136,35 @@ struct ContentView: View {
         applyWindowTranslucency()
         observeFullscreen()
         if terminals.isEmpty { newShellSession() }
+        // Install chrome in the title bar (bypasses SwiftUI's toolbar
+        // wrapper). Defer to next runloop so NSApp.windows.first is the
+        // configured WindowGroup window, not the placeholder.
+        DispatchQueue.main.async { installTitlebarChrome() }
+        syncChromeBridge()
+    }
+
+    /// Push the latest activeTerminal + sidebar state into the AppKit-hosted
+    /// chrome. Call after every state change that the chrome cares about.
+    private func syncChromeBridge() {
+        let bridge = ChromeBridge.shared
+        bridge.activeTerminal = activeTerminal
+        bridge.sidebarCollapsed = sidebarCollapsed
+        bridge.onShowSettings = { showingSettings = true }
+        bridge.onToggleSidebar = { NotificationCenter.default.post(name: .toggleSidebar, object: nil) }
+        bridge.onDeleteJunk = {
+            let n = manager.deleteJunkSessions()
+            if n > 0 { manager.scan() }
+        }
+        bridge.onDeleteEmpty = { deleteEmptySessions() }
+        bridge.onAutoNameOpus = {
+            Task {
+                await manager.autoNameUnnamedSessions { s in
+                    (s.model?.lowercased().contains("opus")) ?? false
+                }
+            }
+        }
+        bridge.onAutoNameAll = { Task { await manager.autoNameUnnamedSessions() } }
+        bridge.onRefresh = { manager.scan() }
     }
 
     /// Observes NSWindow enter/leave fullscreen so the in-content tabBar can hide
@@ -195,24 +216,44 @@ struct ContentView: View {
         }
     }
 
+    /// Install the leading + trailing chrome as NSTitlebarAccessoryViewControllers
+    /// directly into the title bar. This bypasses SwiftUI's `.toolbar` API
+    /// (which forces a visual group around items) and lets each pill stand
+    /// alone in the same row as the traffic lights — auto-hides in fullscreen.
+    private func installTitlebarChrome() {
+        guard let window = NSApp.windows.first else { return }
+        // Already installed? (handleOnAppear can fire more than once across
+        // theme changes etc.)
+        let alreadyInstalled = window.titlebarAccessoryViewControllers.contains {
+            ($0.view.identifier?.rawValue ?? "").hasPrefix("MinionsChrome.")
+        }
+        if alreadyInstalled { return }
+
+        let bridge = ChromeBridge.shared
+        let leading = NSTitlebarAccessoryViewController()
+        let leadingHost = NSHostingView(rootView: TitlebarLeadingChrome(bridge: bridge))
+        leadingHost.identifier = NSUserInterfaceItemIdentifier("MinionsChrome.leading")
+        leadingHost.translatesAutoresizingMaskIntoConstraints = true
+        leadingHost.frame = NSRect(x: 0, y: 0, width: 280, height: 28)
+        leading.view = leadingHost
+        leading.layoutAttribute = .leading
+
+        let trailing = NSTitlebarAccessoryViewController()
+        let trailingHost = NSHostingView(rootView: TitlebarTrailingChrome(bridge: bridge))
+        trailingHost.identifier = NSUserInterfaceItemIdentifier("MinionsChrome.trailing")
+        trailingHost.translatesAutoresizingMaskIntoConstraints = true
+        trailingHost.frame = NSRect(x: 0, y: 0, width: 130, height: 28)
+        trailing.view = trailingHost
+        trailing.layoutAttribute = .trailing
+
+        window.addTitlebarAccessoryViewController(leading)
+        window.addTitlebarAccessoryViewController(trailing)
+    }
+
     // MARK: - Helpers
 
     private var activeTerminal: TerminalSession? {
         activeTerminalId.flatMap { terminals[$0] }
-    }
-
-    /// Plain inline stat (label + value, no capsule background) for the
-    /// right-side cluster. Matches AppKit's native compact-toolbar feel.
-    private func plainStat(label: String, value: String, tint: Color) -> some View {
-        HStack(spacing: 4) {
-            Text(label.uppercased())
-                .font(.system(size: 9, weight: .semibold))
-                .tracking(0.4)
-                .foregroundColor(.white.opacity(0.4))
-            Text(value)
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .foregroundColor(tint)
-        }
     }
 
     // MARK: - Sidebar
@@ -496,93 +537,6 @@ struct ContentView: View {
         }
     }
 
-    /// Row 1 — title bar. Shares its 38pt strip with the traffic lights (which
-    /// are drawn by AppKit on top of our content). In fullscreen the OS hides
-    /// the traffic lights, so we drop the leading reservation and let the
-    /// MinionDot sit flush-left.
-    private var titleRow: some View {
-        HStack(spacing: 10) {
-            MinionDot(size: 12)
-
-            // LEFT cluster — per-tab tools.
-            if let terminal = activeTerminal {
-                if terminal.mode.isWatch {
-                    HStack(spacing: 3) {
-                        Image(systemName: "eye.fill").font(.system(size: 10))
-                        Text("read-only").font(.system(size: 10, weight: .semibold))
-                    }
-                    .padding(.horizontal, 7).padding(.vertical, 3)
-                    .background(Capsule().fill(Color.green.opacity(0.15)))
-                    .foregroundColor(Color.green.opacity(0.85))
-                } else {
-                    ReadOnlyToggle(terminal: terminal)
-                }
-                CdFolderButton(terminal: terminal)
-                if case .shell = terminal.mode {
-                    ClaudeLaunchMenu(terminal: terminal)
-                }
-            }
-
-            Spacer()
-
-            // RIGHT cluster — stats trio + ⋯ + ⚙ + sidebar toggle.
-            HStack(spacing: 12) {
-                plainStat(label: "active", value: "\(manager.activeSessions)", tint: GOLD)
-                plainStat(label: "tracked", value: "\(manager.sessions.count)", tint: TEXT_DIM)
-                plainStat(label: "spent", value: fmtCost(manager.totalCost), tint: Color.orange)
-            }
-            Menu {
-                Button("Delete junk sessions (tmp / empty)") {
-                    let n = manager.deleteJunkSessions()
-                    if n > 0 { manager.scan() }
-                }
-                Button("Delete empty tabs") { deleteEmptySessions() }
-                Divider()
-                Button("Auto-name unnamed Opus sessions") {
-                    Task {
-                        await manager.autoNameUnnamedSessions { s in
-                            (s.model?.lowercased().contains("opus")) ?? false
-                        }
-                    }
-                }
-                Button("Auto-name all unnamed sessions") {
-                    Task { await manager.autoNameUnnamedSessions() }
-                }
-                Divider()
-                Button("Refresh now") { manager.scan() }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-                    .font(.system(size: 13))
-                    .foregroundColor(TEXT_DIM)
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-
-            Button { showingSettings = true } label: {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 13))
-                    .foregroundColor(TEXT_DIM)
-            }
-            .buttonStyle(.plain)
-
-            Button {
-                NotificationCenter.default.post(name: .toggleSidebar, object: nil)
-            } label: {
-                Image(systemName: "sidebar.right")
-                    .font(.system(size: 13))
-                    .foregroundColor(sidebarCollapsed ? TEXT_DIM : GOLD)
-            }
-            .buttonStyle(.plain)
-            .help(sidebarCollapsed ? "Show Claude sessions panel (⌘\\)" : "Hide panel (⌘\\)")
-            .keyboardShortcut("\\")
-        }
-        .padding(.leading, isFullscreen ? 14 : 74)
-        .padding(.trailing, 14)
-        .frame(height: 38)
-        .background(BG_DARKEST.opacity(settings.translucentBackground ? CHROME_TOP_ALPHA : 1))
-    }
-
     /// Row 2 — tabs only, à la Terminal.app. Trailing `+` adds a new shell tab.
     private var tabsRow: some View {
         HStack(spacing: 0) {
@@ -845,18 +799,222 @@ struct ReadOnlyToastOverlay: View {
     }
 }
 
+/// Singleton bridge between SwiftUI's ContentView state and the AppKit-hosted
+/// title-bar chrome. The chrome lives in NSTitlebarAccessoryViewController
+/// hosts that survive across SwiftUI re-renders, so they can't reach into
+/// `ContentView`'s @State directly. ContentView pushes the latest values
+/// here on every change; the chrome views observe via @Observable.
+@MainActor
+@Observable
+final class ChromeBridge {
+    static let shared = ChromeBridge()
+
+    var activeTerminal: TerminalSession?
+    var sidebarCollapsed: Bool = true
+    var onShowSettings: () -> Void = {}
+    var onToggleSidebar: () -> Void = {}
+    var onDeleteJunk: () -> Void = {}
+    var onDeleteEmpty: () -> Void = {}
+    var onAutoNameOpus: () -> Void = {}
+    var onAutoNameAll: () -> Void = {}
+    var onRefresh: () -> Void = {}
+}
+
+/// Leading title-bar accessory: Editing pill, cd pill, Run Claude pill.
+/// Each pill is its own ChromePill — no shared wrapper around them.
+struct TitlebarLeadingChrome: View {
+    let bridge: ChromeBridge
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if let terminal = bridge.activeTerminal {
+                if terminal.mode.isWatch {
+                    ChromePill(accent: Color.green) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "eye.fill").font(.system(size: 11))
+                            Text("read-only").font(.system(size: 11, weight: .medium))
+                        }
+                    }
+                } else {
+                    ReadOnlyToggle(terminal: terminal)
+                    CdFolderButton(terminal: terminal)
+                    if case .shell = terminal.mode {
+                        ClaudeLaunchMenu(terminal: terminal)
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+    }
+}
+
+/// Trailing title-bar accessory: segmented utility pill (⋯ / ⚙ / sidebar).
+struct TitlebarTrailingChrome: View {
+    let bridge: ChromeBridge
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Spacer(minLength: 0)
+            ChromePillSegmentedActions(
+                onShowSettings: bridge.onShowSettings,
+                onToggleSidebar: bridge.onToggleSidebar,
+                sidebarCollapsed: bridge.sidebarCollapsed,
+                onDeleteJunk: bridge.onDeleteJunk,
+                onDeleteEmpty: bridge.onDeleteEmpty,
+                onAutoNameOpus: bridge.onAutoNameOpus,
+                onAutoNameAll: bridge.onAutoNameAll,
+                onRefresh: bridge.onRefresh
+            )
+        }
+        .padding(.horizontal, 8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+    }
+}
+
+/// Shared visual shell for every chrome control — `cd`, `Editing`,
+/// `Run Claude`, etc. One source of truth for padding, corner radius,
+/// border, hover/press state. Pass an optional `accent` to tint stateful
+/// buttons (gold for `Editing`, etc.). The pill sizes itself to its
+/// content vertically — never clips text — and is tall enough (~24pt)
+/// to feel like a proper toolbar button.
+struct ChromePill<Content: View>: View {
+    var accent: Color? = nil
+    @ViewBuilder var content: () -> Content
+    @State private var hovering = false
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        content()
+            .font(.system(size: 11, weight: .medium))
+            .foregroundColor(foreground)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(fill)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(stroke, lineWidth: 0.5)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .onHover { hovering = $0 && isEnabled }
+            .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+
+    private var foreground: Color {
+        if let accent = accent { return accent.opacity(isEnabled ? 0.95 : 0.5) }
+        return .white.opacity(isEnabled ? 0.78 : 0.4)
+    }
+
+    private var fill: Color {
+        if let accent = accent {
+            return accent.opacity(hovering ? 0.18 : 0.10)
+        }
+        return Color.white.opacity(hovering ? 0.10 : 0.05)
+    }
+
+    private var stroke: Color {
+        if let accent = accent {
+            return accent.opacity(hovering ? 0.45 : 0.25)
+        }
+        return Color.white.opacity(hovering ? 0.18 : 0.08)
+    }
+}
+
+/// Segmented toolbar pill — bundles three icon buttons (⋯ menu, ⚙ settings,
+/// sidebar toggle) into a single rounded shell with hairline dividers, like
+/// AppKit's NSSegmentedControl. Lives at the right edge of the chrome row.
+struct ChromePillSegmentedActions: View {
+    let onShowSettings: () -> Void
+    let onToggleSidebar: () -> Void
+    let sidebarCollapsed: Bool
+    let onDeleteJunk: () -> Void
+    let onDeleteEmpty: () -> Void
+    let onAutoNameOpus: () -> Void
+    let onAutoNameAll: () -> Void
+    let onRefresh: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Menu {
+                Button("Delete junk sessions (tmp / empty)") { onDeleteJunk() }
+                Button("Delete empty tabs") { onDeleteEmpty() }
+                Divider()
+                Button("Auto-name unnamed Opus sessions") { onAutoNameOpus() }
+                Button("Auto-name all unnamed sessions") { onAutoNameAll() }
+                Divider()
+                Button("Refresh now") { onRefresh() }
+            } label: {
+                segmentIcon(systemName: "ellipsis", weight: .bold, tint: nil)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+
+            divider
+            Button(action: onShowSettings) {
+                segmentIcon(systemName: "gearshape", weight: .regular, tint: nil)
+            }
+            .buttonStyle(.plain)
+            .help("Settings")
+
+            divider
+            Button(action: onToggleSidebar) {
+                segmentIcon(
+                    systemName: "sidebar.right",
+                    weight: .regular,
+                    tint: sidebarCollapsed ? nil : Color(red: 1.0, green: 0.78, blue: 0.10)
+                )
+            }
+            .buttonStyle(.plain)
+            .help(sidebarCollapsed ? "Show Claude sessions panel (⌘\\)" : "Hide panel (⌘\\)")
+            .keyboardShortcut("\\")
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.white.opacity(hovering ? 0.08 : 0.05))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .strokeBorder(Color.white.opacity(hovering ? 0.16 : 0.08), lineWidth: 0.5)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+
+    @ViewBuilder
+    private func segmentIcon(systemName: String, weight: Font.Weight, tint: Color?) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: 11, weight: weight))
+            .foregroundColor(tint ?? Color.white.opacity(0.78))
+            .frame(width: 28, height: 22)
+            .contentShape(Rectangle())
+    }
+
+    private var divider: some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.10))
+            .frame(width: 0.5, height: 14)
+    }
+}
+
+
 struct CdFolderButton: View {
     let terminal: TerminalSession
 
     var body: some View {
         Button(action: pickAndCd) {
-            HStack(spacing: 3) {
-                Image(systemName: "folder").font(.system(size: 10))
-                Text("cd").font(.system(size: 10, weight: .semibold, design: .monospaced))
+            ChromePill {
+                HStack(spacing: 4) {
+                    Image(systemName: "folder").font(.system(size: 11))
+                    Text("cd").font(.system(size: 11, weight: .medium, design: .monospaced))
+                }
             }
-            .padding(.horizontal, 7).padding(.vertical, 3)
-            .background(Capsule().fill(Color.white.opacity(0.06)))
-            .foregroundColor(.white.opacity(0.7))
         }
         .buttonStyle(.plain)
         .help("Pick a folder and cd into it")
@@ -888,15 +1046,14 @@ struct ReadOnlyToggle: View {
             terminal.toggleReadOnly()
             readOnly = terminal.isReadOnly
         } label: {
-            HStack(spacing: 3) {
-                Image(systemName: readOnly ? "lock.fill" : "pencil.circle.fill")
-                    .font(.system(size: 10))
-                Text(readOnly ? "Read-only" : "Editing")
-                    .font(.system(size: 10, weight: .semibold))
+            ChromePill(accent: readOnly ? nil : Color(red: 1.0, green: 0.78, blue: 0.10)) {
+                HStack(spacing: 4) {
+                    Image(systemName: readOnly ? "lock.fill" : "pencil.circle.fill")
+                        .font(.system(size: 11))
+                    Text(readOnly ? "Read-only" : "Editing")
+                        .font(.system(size: 11, weight: .medium))
+                }
             }
-            .padding(.horizontal, 7).padding(.vertical, 3)
-            .background(Capsule().fill(readOnly ? Color.gray.opacity(0.18) : Color(red: 1.0, green: 0.78, blue: 0.10).opacity(0.15)))
-            .foregroundColor(readOnly ? .white.opacity(0.7) : Color(red: 1.0, green: 0.78, blue: 0.10))
         }
         .buttonStyle(.plain)
         .help(readOnly ? "Read-only mode — click to enable editing (⌘E)" : "Editing mode — click to lock (⌘E)")
@@ -1043,15 +1200,13 @@ struct ClaudeLaunchMenu: View {
 
     var body: some View {
         Button { showingPopover = true } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "sparkles")
-                Text("Run Claude")
-                Image(systemName: "chevron.down").font(.system(size: 8))
+            ChromePill(accent: Color(red: 1.0, green: 0.78, blue: 0.10)) {
+                HStack(spacing: 4) {
+                    Image(systemName: "sparkles").font(.system(size: 11))
+                    Text("Run Claude").font(.system(size: 11, weight: .semibold))
+                    Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
+                }
             }
-            .font(.system(size: 11, weight: .semibold))
-            .padding(.horizontal, 10).padding(.vertical, 5)
-            .background(Capsule().fill(Color(red: 1.0, green: 0.78, blue: 0.10).opacity(0.15)))
-            .foregroundColor(Color(red: 1.0, green: 0.78, blue: 0.10))
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingPopover, arrowEdge: .top) {
