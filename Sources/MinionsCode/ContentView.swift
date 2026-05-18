@@ -531,7 +531,8 @@ struct ContentView: View {
                                         terminal.activate()
                                     }
                                 },
-                                onClose: { closeTerminal(tid) }
+                                onClose: { closeTerminal(tid) },
+                                onMoveToNewWindow: { moveTabToNewWindow(tid) }
                             )
                             .onDrag {
                                 NSItemProvider(object: tid as NSString)
@@ -578,6 +579,30 @@ struct ContentView: View {
         // edge case where the user has work in progress.
         pendingCloseId = id
         showingCloseConfirm = true
+    }
+
+    private func moveTabToNewWindow(_ id: String) {
+        guard let terminal = terminals[id] else { return }
+        // Remove from current window
+        terminals.removeValue(forKey: id)
+        orderedTerminalIds.removeAll { $0 == id }
+        if activeTerminalId == id {
+            activeTerminalId = orderedTerminalIds.first
+            if let next = activeTerminalId { terminals[next]?.activate() }
+        }
+        // Create new window with this terminal
+        let newWindow = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 1280, height: 780),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        newWindow.title = "MinionsCode"
+        newWindow.titlebarAppearsTransparent = true
+        newWindow.isOpaque = settings.translucentBackground ? false : true
+        newWindow.backgroundColor = settings.translucentBackground ? .clear : NSColor(red: 0.04, green: 0.04, blue: 0.05, alpha: 1)
+        newWindow.contentView = NSHostingView(rootView: DetachedWindowView(terminal: terminal))
+        newWindow.makeKeyAndOrderFront(nil)
     }
 
     private func reallyCloseTerminal(_ id: String) {
@@ -1395,6 +1420,7 @@ struct TabChip: View {
     let isActive: Bool
     let onSelect: () -> Void
     let onClose: () -> Void
+    let onMoveToNewWindow: () -> Void
     @State private var isHovering = false
 
     private var statusIcon: (name: String, color: Color) {
@@ -1447,6 +1473,59 @@ struct TabChip: View {
         )
         .contentShape(Rectangle())
         .onTapGesture { onSelect() }
+        .contextMenu {
+            Button("Move to New Window") { onMoveToNewWindow() }
+            Divider()
+            Button("Close Tab", role: .destructive) { onClose() }
+        }
+    }
+}
+
+/// Simplified view for detached terminal windows. Shows only the terminal,
+/// no tab bar, no sidebar. The window closes when the terminal exits.
+struct DetachedWindowView: View {
+    let terminal: TerminalSession
+    @State private var settings = AppSettings.shared
+
+    var body: some View {
+        TerminalViewRepresentable(terminal: terminal)
+            .background(
+                settings.translucentBackground
+                    ? AnyView(ZStack {
+                        VisualEffectBackground(material: .hudWindow, blendingMode: .behindWindow)
+                        BG_DARKEST.opacity(TERMINAL_ALPHA)
+                    })
+                    : AnyView(BG_DARKEST)
+            )
+            .preferredColorScheme(.dark)
+            .environment(\.uiScale, settings.fontSize / 13.0)
+            .onChange(of: settings.theme) { _, _ in
+                TerminalSession.applyDefaultTheme(to: terminal.terminalView)
+            }
+            .onChange(of: settings.fontSize) { _, _ in
+                TerminalSession.applyDefaultTheme(to: terminal.terminalView)
+            }
+            .onChange(of: settings.translucentBackground) { _, _ in
+                TerminalSession.applyDefaultTheme(to: terminal.terminalView)
+                applyWindowTranslucency()
+            }
+            .onAppear {
+                terminal.activate()
+                applyWindowTranslucency()
+            }
+    }
+
+    private func applyWindowTranslucency() {
+        guard let window = NSApp.windows.first(where: { $0.contentView is NSHostingView<DetachedWindowView> }) else { return }
+        window.titlebarAppearsTransparent = true
+        window.styleMask.insert(.fullSizeContentView)
+        if settings.translucentBackground {
+            window.isOpaque = false
+            window.backgroundColor = .clear
+        } else {
+            window.isOpaque = true
+            window.backgroundColor = NSColor(red: 0.04, green: 0.04, blue: 0.05, alpha: 1)
+        }
     }
 }
 
