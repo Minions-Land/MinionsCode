@@ -152,6 +152,11 @@ final class TerminalSession: @unchecked Sendable {
         // I-beam (bar) cursor — much easier to read than the default block
         // which covers the character underneath it.
         terminalView.terminal.setCursorStyle(.blinkBar)
+        // Bump scrollback from the default 500 lines to 50,000 — Claude Code
+        // sessions easily produce thousands of lines of output, and the user
+        // wants to scroll all the way back via the scroll bar.
+        terminalView.terminal.options.scrollback = 50_000
+        terminalView.terminal.buffer.changeHistorySize(50_000)
 
         let env = buildEnv()
         switch mode {
