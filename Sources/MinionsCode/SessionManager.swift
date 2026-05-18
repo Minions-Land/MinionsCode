@@ -159,7 +159,7 @@ final class SessionManager {
             let history = Self.scanHistory(claudeDir: claudeDir, customNames: snapshotNames, days: days)
             await MainActor.run { [weak self] in
                 guard let self = self else { return }
-                let historyById = Dictionary(uniqueKeysWithValues: history.map { ($0.id, $0) })
+                let historyById = Dictionary(history.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
                 let liveSet = Set(self.sessions.filter(\.isAlive).map(\.id))
                 var merged: [SessionInfo] = []
                 // Enrich alive sessions with parsed model/usage from their JSONL.

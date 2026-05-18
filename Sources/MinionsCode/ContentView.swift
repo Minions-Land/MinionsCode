@@ -1743,11 +1743,22 @@ struct SettingsSheet: View {
                 Toggle("Group sessions by directory", isOn: $settings.groupByDirectory)
                 Toggle("Notify when Claude finishes", isOn: $settings.notificationsEnabled)
                 Toggle("Play sound on completion", isOn: $settings.soundEnabled).disabled(!settings.notificationsEnabled)
+                HStack {
+                    Text("Scrollback (lines)").font(.system(size: 12))
+                    Spacer()
+                    Stepper(
+                        "\(settings.scrollbackLines.formatted())",
+                        value: $settings.scrollbackLines,
+                        in: 1_000...500_000,
+                        step: 5_000
+                    )
+                    .help("Applies to new tabs. Larger values use more memory.")
+                }
             }
             Spacer()
         }
         .padding(20)
-        .frame(width: 420, height: 360)
+        .frame(width: 460, height: 400)
         .background(BG_DARK)
         .preferredColorScheme(.dark)
     }

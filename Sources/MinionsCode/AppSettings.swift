@@ -18,6 +18,7 @@ final class AppSettings {
     private let hideEmptyFoldersKey = "minionscode.hideEmptyFolders"
     private let hideInactiveFoldersKey = "minionscode.hideInactiveFolders"
     private let collapseInactivesKey = "minionscode.collapseInactives"
+    private let scrollbackKey = "minionscode.scrollbackLines"
 
     var fontSize: CGFloat {
         didSet { defaults.set(Double(fontSize), forKey: fontSizeKey) }
@@ -62,6 +63,14 @@ final class AppSettings {
         didSet { defaults.set(collapseInactivesInFolder, forKey: collapseInactivesKey) }
     }
 
+    /// Terminal scrollback buffer (in lines). Default 50,000. Larger values
+    /// let you scroll further back at the cost of memory — each line is a
+    /// few hundred bytes. Applied to NEW terminal sessions; existing tabs
+    /// keep their initial scrollback.
+    var scrollbackLines: Int {
+        didSet { defaults.set(scrollbackLines, forKey: scrollbackKey) }
+    }
+
     init() {
         self.fontSize = defaults.object(forKey: fontSizeKey) as? CGFloat ?? 13
         self.theme = Theme(rawValue: defaults.string(forKey: themeKey) ?? "minion") ?? .minion
@@ -73,6 +82,7 @@ final class AppSettings {
         self.hideEmptyFolders = defaults.object(forKey: hideEmptyFoldersKey) as? Bool ?? true
         self.hideInactiveFolders = defaults.object(forKey: hideInactiveFoldersKey) as? Bool ?? false
         self.collapseInactivesInFolder = defaults.object(forKey: collapseInactivesKey) as? Bool ?? true
+        self.scrollbackLines = defaults.object(forKey: scrollbackKey) as? Int ?? 50_000
     }
 }
 
