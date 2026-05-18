@@ -127,6 +127,8 @@ final class TerminalSession: @unchecked Sendable {
     let cwd: String
     var isReadOnly: Bool = false
     private(set) var isRunning = false
+    /// Set when the child process exits. nil = still running, 0 = clean exit, other = error.
+    private(set) var exitCode: Int32? = nil
 
     init(mode: SessionMode = .shell, cwd: String? = nil) {
         self.mode = mode
@@ -142,7 +144,11 @@ final class TerminalSession: @unchecked Sendable {
         self.terminalView = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
         TerminalSession.applyDefaultTheme(to: terminalView)
         terminalView.optionAsMetaKey = true
-        terminalView.disableFullRedrawOnAnyChanges = true
+        // Always render the caret as "focused" regardless of window focus state.
+        // Without this, any brief focus loss (e.g. clicking the wrapper view,
+        // switching to a menu) dims the caret — especially noticeable inside
+        // Claude Code's readline prompt.
+        terminalView.caretViewTracksFocus = false
 
         let env = buildEnv()
         switch mode {
@@ -150,16 +156,12 @@ final class TerminalSession: @unchecked Sendable {
             let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
             terminalView.startProcess(executable: shell, args: ["-l"], environment: env, execName: "-\(URL(fileURLWithPath: shell).lastPathComponent)", currentDirectory: self.cwd)
         case .claude(let resumeId):
-            // Claude sessions default to read-only — like the official `claude --resume`
-            // experience, the user can scroll/copy without accidentally typing into a
-            // long-running task. Toggle with ⌘E or the lock pill.
             self.isReadOnly = true
             let claudePath = findClaude()
             var args = [String]()
             if let rid = resumeId { args = ["--resume", rid] }
             terminalView.startProcess(executable: claudePath, args: args, environment: env, execName: "claude", currentDirectory: self.cwd)
         case .watch(let sessionId):
-            // Read-only and locked — there's no claude process to send input to.
             self.isReadOnly = true
             let scriptPath = TerminalSession.ensureWatcherScript()
             terminalView.startProcess(
@@ -171,6 +173,7 @@ final class TerminalSession: @unchecked Sendable {
             )
         }
         isRunning = true
+        terminalView.processDelegate = self
     }
 
     func sendCommand(_ command: String) {
@@ -241,6 +244,7 @@ final class TerminalSession: @unchecked Sendable {
         var env = ProcessInfo.processInfo.environment
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
+        env["TERM_PROGRAM"] = "iTerm.app"
         env["LANG"] = env["LANG"] ?? "en_US.UTF-8"
         env["MINIONSCODE"] = "1"
         return env.map { "\($0.key)=\($0.value)" }
@@ -276,6 +280,20 @@ final class TerminalSession: @unchecked Sendable {
         ]
         for path in candidates where FileManager.default.isExecutableFile(atPath: path) { return path }
         return "/opt/homebrew/bin/claude"
+    }
+}
+
+@MainActor
+extension TerminalSession: LocalProcessTerminalViewDelegate {
+    nonisolated func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
+    nonisolated func setTerminalTitle(source: LocalProcessTerminalView, title: String) {}
+    nonisolated func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
+    nonisolated func processTerminated(source: TerminalView, exitCode: Int32?) {
+        let code = exitCode
+        DispatchQueue.main.async { [weak self] in
+            self?.isRunning = false
+            self?.exitCode = code
+        }
     }
 }
 

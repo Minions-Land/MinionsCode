@@ -39,7 +39,6 @@ struct ContentView: View {
     @State private var showingCloseConfirm = false
     @State private var pendingCloseId: String?
     @State private var modelFilter: ModelFamilyFilter = .all
-    @State private var isFullscreen: Bool = false
 
     private var sidebarTargetWidth: CGFloat {
         sidebarCollapsed ? 0 : sidebarWidth
@@ -63,6 +62,7 @@ struct ContentView: View {
                 newShell: newShellSession,
                 toggleSidebar: { withAnimation(.easeInOut(duration: 0.2)) { sidebarCollapsed.toggle() } },
                 closeActive: { if let tid = activeTerminalId { closeTerminal(tid) } },
+                showSettings: { showingSettings = true },
                 zoomIn: { settings.fontSize = min(22, settings.fontSize + 1) },
                 zoomOut: { settings.fontSize = max(9, settings.fontSize - 1) },
                 zoomReset: { settings.fontSize = 13 },
@@ -134,11 +134,7 @@ struct ContentView: View {
         manager.startPolling()
         NSApp.activate(ignoringOtherApps: true)
         applyWindowTranslucency()
-        observeFullscreen()
         if terminals.isEmpty { newShellSession() }
-        // Install chrome in the title bar (bypasses SwiftUI's toolbar
-        // wrapper). Defer to next runloop so NSApp.windows.first is the
-        // configured WindowGroup window, not the placeholder.
         DispatchQueue.main.async { installTitlebarChrome() }
         syncChromeBridge()
     }
@@ -149,37 +145,18 @@ struct ContentView: View {
         let bridge = ChromeBridge.shared
         bridge.activeTerminal = activeTerminal
         bridge.sidebarCollapsed = sidebarCollapsed
-        bridge.onShowSettings = { showingSettings = true }
+        bridge.onShowSettings = { NotificationCenter.default.post(name: .showSettings, object: nil) }
         bridge.onToggleSidebar = { NotificationCenter.default.post(name: .toggleSidebar, object: nil) }
         bridge.onDeleteJunk = {
-            let n = manager.deleteJunkSessions()
-            if n > 0 { manager.scan() }
+            let n = SessionManager.shared.deleteJunkSessions()
+            if n > 0 { SessionManager.shared.scan() }
         }
-        bridge.onDeleteEmpty = { deleteEmptySessions() }
+        bridge.onDeleteEmpty = { SessionManager.shared.scan() }
         bridge.onAutoNameOpus = {
-            Task {
-                await manager.autoNameUnnamedSessions { s in
-                    (s.model?.lowercased().contains("opus")) ?? false
-                }
-            }
+            Task { await SessionManager.shared.autoNameUnnamedSessions { s in (s.model?.lowercased().contains("opus")) ?? false } }
         }
-        bridge.onAutoNameAll = { Task { await manager.autoNameUnnamedSessions() } }
-        bridge.onRefresh = { manager.scan() }
-    }
-
-    /// Observes NSWindow enter/leave fullscreen so the in-content tabBar can hide
-    /// when fullscreen — the OS title bar already auto-hides on its own, so we just
-    /// match it for the second row.
-    private func observeFullscreen() {
-        guard let window = NSApp.windows.first else { return }
-        isFullscreen = window.styleMask.contains(.fullScreen)
-        let nc = NotificationCenter.default
-        nc.addObserver(forName: NSWindow.didEnterFullScreenNotification, object: window, queue: .main) { _ in
-            Task { @MainActor in self.isFullscreen = true }
-        }
-        nc.addObserver(forName: NSWindow.didExitFullScreenNotification, object: window, queue: .main) { _ in
-            Task { @MainActor in self.isFullscreen = false }
-        }
+        bridge.onAutoNameAll = { Task { await SessionManager.shared.autoNameUnnamedSessions() } }
+        bridge.onRefresh = { SessionManager.shared.scan() }
     }
 
     private func reapplyTheme() {
@@ -746,7 +723,7 @@ struct IsolatedTerminalView: View {
     let terminal: TerminalSession
 
     var body: some View {
-        TerminalViewRepresentable(terminalView: terminal.terminalView)
+        TerminalViewRepresentable(terminal: terminal)
     }
 }
 
@@ -1384,19 +1361,28 @@ struct TabChip: View {
     let onClose: () -> Void
     @State private var isHovering = false
 
-    private var modeIcon: String {
-        switch terminal.mode {
-        case .shell: return "terminal"
-        case .claude: return "sparkles"
-        case .watch: return "eye"
+    private var statusIcon: (name: String, color: Color) {
+        if terminal.isRunning {
+            switch terminal.mode {
+            case .shell:    return ("terminal", isActive ? GOLD : .white.opacity(0.5))
+            case .claude:   return ("sparkles", isActive ? GOLD : .white.opacity(0.5))
+            case .watch:    return ("eye", isActive ? GOLD : .white.opacity(0.5))
+            }
+        }
+        // Process exited
+        let code = terminal.exitCode ?? 0
+        if code == 0 {
+            return ("checkmark.circle.fill", Color.green.opacity(0.8))
+        } else {
+            return ("xmark.circle.fill", Color.red.opacity(0.8))
         }
     }
 
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: modeIcon)
+            Image(systemName: statusIcon.name)
                 .font(.system(size: 10))
-                .foregroundColor(isActive ? Color(red: 1.0, green: 0.78, blue: 0.10) : .white.opacity(0.5))
+                .foregroundColor(statusIcon.color)
             Text(sessionName)
                 .font(.system(size: 11, weight: isActive ? .semibold : .regular))
                 .foregroundColor(isActive ? .white : .white.opacity(0.6))
@@ -1773,6 +1759,7 @@ struct GlobalNotifications: ViewModifier {
     let newShell: () -> Void
     let toggleSidebar: () -> Void
     let closeActive: () -> Void
+    let showSettings: () -> Void
     let zoomIn: () -> Void
     let zoomOut: () -> Void
     let zoomReset: () -> Void
@@ -1785,6 +1772,7 @@ struct GlobalNotifications: ViewModifier {
             .onReceive(NotificationCenter.default.publisher(for: .newSession)) { _ in newShell() }
             .onReceive(NotificationCenter.default.publisher(for: .toggleSidebar)) { _ in toggleSidebar() }
             .onReceive(NotificationCenter.default.publisher(for: .closeActiveTab)) { _ in closeActive() }
+            .onReceive(NotificationCenter.default.publisher(for: .showSettings)) { _ in showSettings() }
             .onReceive(NotificationCenter.default.publisher(for: .zoomIn)) { _ in zoomIn() }
             .onReceive(NotificationCenter.default.publisher(for: .zoomOut)) { _ in zoomOut() }
             .onReceive(NotificationCenter.default.publisher(for: .zoomReset)) { _ in zoomReset() }

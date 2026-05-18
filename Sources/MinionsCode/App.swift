@@ -71,6 +71,7 @@ extension Notification.Name {
     static let newSession = Notification.Name("newSession")
     static let toggleSidebar = Notification.Name("toggleSidebar")
     static let closeActiveTab = Notification.Name("closeActiveTab")
+    static let showSettings = Notification.Name("showSettings")
     static let zoomIn = Notification.Name("zoomIn")
     static let zoomOut = Notification.Name("zoomOut")
     static let zoomReset = Notification.Name("zoomReset")
