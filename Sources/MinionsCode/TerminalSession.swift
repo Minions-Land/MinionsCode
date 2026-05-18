@@ -169,7 +169,12 @@ final class TerminalSession: @unchecked Sendable {
             self.isReadOnly = true
             let claudePath = findClaude()
             var args = [String]()
-            if let rid = resumeId { args = ["--resume", rid] }
+            if let rid = resumeId {
+                args = ["--resume", rid]
+            }
+            // Default flags: max effort, opus-4-7, bypass permissions.
+            // User can override via the Run Claude menu for one-off changes.
+            args += ["--effort", "max", "--model", "claude-opus-4-7", "--permission-mode", "bypassPermissions"]
             terminalView.startProcess(executable: claudePath, args: args, environment: env, execName: "claude", currentDirectory: self.cwd)
         case .watch(let sessionId):
             self.isReadOnly = true

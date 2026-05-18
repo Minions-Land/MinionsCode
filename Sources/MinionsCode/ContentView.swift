@@ -1042,9 +1042,9 @@ struct ReadOnlyToggle: View {
 struct ClaudeLaunchMenu: View {
     let terminal: TerminalSession
     @State private var showingPopover = false
-    @State private var selectedModel: ClaudeModel = .auto
-    @State private var effort: EffortLevel = .none
-    @State private var permissionMode: PermissionMode = .none
+    @State private var selectedModel: ClaudeModel = .opus47
+    @State private var effort: EffortLevel = .max
+    @State private var permissionMode: PermissionMode = .bypassPermissions
     @State private var dangerouslySkipPermissions = false
     @State private var sandbox = false
     @State private var resumeMode: ResumeMode = .none
