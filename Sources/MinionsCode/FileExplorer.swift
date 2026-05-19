@@ -18,20 +18,60 @@ final class FileNode: Identifiable {
     var loadError: String? = nil
 
     nonisolated var id: String { url.path }
-    var name: String { url.lastPathComponent }
+    nonisolated var name: String { url.lastPathComponent }
 
-    init(url: URL) {
+    /// Cached file kind so the icon/color path doesn't sniff bytes
+    /// on every render. Folders skip the lookup entirely.
+    let kind: FileKind
+
+    nonisolated init(url: URL) {
         self.url = url
         var isDir: ObjCBool = false
         FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
         self.isDirectory = isDir.boolValue
+        // Skip kind detection for folders (we render a folder icon regardless)
+        // and skip the byte-sniff fallback at construction time — only do
+        // extension match. The sniff happens lazily inside FilePreview if
+        // the user actually selects an unknown-extension file.
+        self.kind = isDir.boolValue ? .binary : FileKind.detectByExtension(url)
     }
 
-    /// Load immediate children. Filters .DS_Store but keeps other dotfiles
-    /// (.git, .claude, .codex etc.) so the explorer reflects what's actually
-    /// in the directory — same as VS Code's "show hidden" default.
+    /// Load immediate children synchronously on the main actor. Used for
+    /// initial root setup (we want children available before render).
+    /// For lazy expansion, prefer `loadChildrenAsync` which keeps the
+    /// expand toggle from blocking the UI on large folders.
     func loadChildren() {
         guard isDirectory else { return }
+        let kids = Self.readDirectory(at: url)
+        self.children = kids.children
+        self.loadError = kids.error
+    }
+
+    /// Off-main directory read so toggling a folder with thousands of
+    /// entries doesn't freeze the click. Resolves on main with the
+    /// loaded children. Use `await` from a Task triggered by user input.
+    func loadChildrenAsync() async {
+        guard isDirectory, children == nil else { return }
+        let target = url
+        let result = await Task.detached(priority: .userInitiated) {
+            FileNode.readDirectoryNonisolated(at: target)
+        }.value
+        // Re-check that we're still expecting these children (the user
+        // may have collapsed and re-expanded; we're cheap to redo).
+        self.children = result.children
+        self.loadError = result.error
+    }
+
+    /// MainActor-friendly entry point for Self.readDirectoryNonisolated —
+    /// safe to call from synchronous main-actor code.
+    private static func readDirectory(at url: URL) -> (children: [FileNode], error: String?) {
+        return readDirectoryNonisolated(at: url)
+    }
+
+    /// Pure file-system read. No actor isolation — the FileNode instances
+    /// it constructs are also nonisolated (a fresh init), so handing them
+    /// back to MainActor on the next line is fine.
+    nonisolated static func readDirectoryNonisolated(at url: URL) -> (children: [FileNode], error: String?) {
         do {
             let urls = try FileManager.default.contentsOfDirectory(
                 at: url,
@@ -45,11 +85,9 @@ final class FileNode: Identifiable {
                     if lhs.isDirectory != rhs.isDirectory { return lhs.isDirectory }
                     return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
                 }
-            self.children = kids
-            self.loadError = nil
+            return (kids, nil)
         } catch {
-            self.children = []
-            self.loadError = error.localizedDescription
+            return ([], error.localizedDescription)
         }
     }
 
@@ -83,8 +121,10 @@ enum FileKind {
     case pdf
     case binary       // unknown / not previewable
 
-    /// Heuristic: extension first, then content sniff for unknown types.
-    static func detect(_ url: URL) -> FileKind {
+    /// Extension-only detection — fast, used for the tree row icon/color
+    /// path. Falls back to .binary for unknown extensions; the preview
+    /// pane upgrades to .text via byte-sniff if the user opens it.
+    static func detectByExtension(_ url: URL) -> FileKind {
         let ext = url.pathExtension.lowercased()
         switch ext {
         case "md", "markdown", "mdx":            return .markup
@@ -105,8 +145,15 @@ enum FileKind {
         case "txt", "log", "conf", "cfg", "ini",
              "env", "gitignore", "gitattributes",
              "rtf":                                return .text
-        default: break
+        default:                                   return .binary
         }
+    }
+
+    /// Heuristic: extension first, then content sniff for unknown types.
+    /// Used by FilePreview which can afford the I/O.
+    static func detect(_ url: URL) -> FileKind {
+        let byExt = detectByExtension(url)
+        if byExt != .binary { return byExt }
         // No extension or unknown: sniff first 4KB.
         if let data = try? Data(contentsOf: url, options: [.mappedIfSafe]).prefix(4096),
            data.allSatisfy({ $0 == 0x09 || $0 == 0x0A || $0 == 0x0D || ($0 >= 0x20 && $0 < 0x7F) || $0 >= 0x80 }) {
@@ -254,7 +301,7 @@ struct FileExplorerPanel: View {
 
     private var scrollContents: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 4) {
+            LazyVStack(alignment: .leading, spacing: 4) {
                 sectionHeader(
                     title: settings.explorerAutoFollow ? "CWD" : "FOLDER",
                     subtitle: topRoot?.url.lastPathComponent ?? "no terminal"
@@ -523,6 +570,7 @@ struct FileTreeRow: View {
                         onCommitRename: onCommitRename
                     )
                 }
+                .transition(.opacity)
             }
         }
     }
@@ -575,20 +623,21 @@ struct FileTreeRow: View {
         )
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
-        .onTapGesture(count: 2) {
-            if node.isDirectory {
-                toggleExpand()
-            } else {
-                NSWorkspace.shared.open(node.url)
-            }
-        }
-        .onTapGesture(count: 1) {
+        // Single click reacts immediately — toggling folders or selecting
+        // files. A separate count:2 gesture in .simultaneousGesture handles
+        // double click on FILES only (open in default app). Folders never
+        // need a double-click handler, so they don't pay for one.
+        .onTapGesture {
             if node.isDirectory {
                 toggleExpand()
             } else {
                 selectedURL = node.url
             }
         }
+        .simultaneousGesture(
+            node.isDirectory ? nil :
+            TapGesture(count: 2).onEnded { NSWorkspace.shared.open(node.url) }
+        )
     }
 
     private var hoverActions: some View {
@@ -631,12 +680,12 @@ struct FileTreeRow: View {
         if node.isDirectory {
             return node.isExpanded ? "folder.fill" : "folder"
         }
-        return FileKind.detect(node.url).iconName
+        return node.kind.iconName
     }
 
     private var iconColor: Color {
         if node.isDirectory { return Color(red: 1.0, green: 0.78, blue: 0.10).opacity(0.85) }
-        switch FileKind.detect(node.url) {
+        switch node.kind {
         case .image:       return Color(red: 0.55, green: 0.85, blue: 0.55)
         case .pdf:         return Color(red: 1.00, green: 0.45, blue: 0.40)
         case .markup:      return Color(red: 0.65, green: 0.85, blue: 1.00)
@@ -648,10 +697,20 @@ struct FileTreeRow: View {
     }
 
     private func toggleExpand() {
-        if !node.isExpanded && node.children == nil {
-            node.loadChildren()
+        let willExpand = !node.isExpanded
+        if willExpand && node.children == nil {
+            // Optimistic expand with empty children; load happens off-main
+            // and fills in when ready. Keeps the click feeling instant.
+            node.children = []
+            withAnimation(.easeOut(duration: 0.15)) {
+                node.isExpanded = true
+            }
+            Task { await node.loadChildrenAsync() }
+        } else {
+            withAnimation(.easeOut(duration: 0.15)) {
+                node.isExpanded.toggle()
+            }
         }
-        node.isExpanded.toggle()
     }
 }
 
