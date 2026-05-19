@@ -629,7 +629,7 @@ struct FileTreeRow: View {
         // need a double-click handler, so they don't pay for one.
         .onTapGesture {
             if node.isDirectory {
-                toggleExpand()
+                expandFolder()
             } else {
                 selectedURL = node.url
             }
@@ -696,9 +696,9 @@ struct FileTreeRow: View {
         }
     }
 
-    private func toggleExpand() {
-        let willExpand = !node.isExpanded
-        if willExpand && node.children == nil {
+    private func expandFolder() {
+        guard !node.isExpanded else { return }
+        if node.children == nil {
             // Optimistic expand with empty children; load happens off-main
             // and fills in when ready. Keeps the click feeling instant.
             node.children = []
@@ -708,7 +708,7 @@ struct FileTreeRow: View {
             Task { await node.loadChildrenAsync() }
         } else {
             withAnimation(.easeOut(duration: 0.15)) {
-                node.isExpanded.toggle()
+                node.isExpanded = true
             }
         }
     }
