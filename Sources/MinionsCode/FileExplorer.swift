@@ -697,10 +697,7 @@ struct FileTreeRow: View {
     }
 
     private func expandFolder() {
-        guard !node.isExpanded else { return }
-        if node.children == nil {
-            // Optimistic expand with empty children; load happens off-main
-            // and fills in when ready. Keeps the click feeling instant.
+        if !node.isExpanded && node.children == nil {
             node.children = []
             withAnimation(.easeOut(duration: 0.15)) {
                 node.isExpanded = true
@@ -708,7 +705,7 @@ struct FileTreeRow: View {
             Task { await node.loadChildrenAsync() }
         } else {
             withAnimation(.easeOut(duration: 0.15)) {
-                node.isExpanded = true
+                node.isExpanded.toggle()
             }
         }
     }
