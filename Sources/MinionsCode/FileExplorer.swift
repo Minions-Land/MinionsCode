@@ -51,7 +51,7 @@ final class FileNode: Identifiable {
     /// entries doesn't freeze the click. Resolves on main with the
     /// loaded children. Use `await` from a Task triggered by user input.
     func loadChildrenAsync() async {
-        guard isDirectory, children == nil else { return }
+        guard isDirectory else { return }
         let target = url
         let result = await Task.detached(priority: .userInitiated) {
             FileNode.readDirectoryNonisolated(at: target)
@@ -697,15 +697,22 @@ struct FileTreeRow: View {
     }
 
     private func expandFolder() {
-        if !node.isExpanded && node.children == nil {
-            node.children = []
-            withAnimation(.easeOut(duration: 0.15)) {
-                node.isExpanded = true
+        if !node.isExpanded {
+            // Load children if not yet loaded
+            if node.children == nil || node.children?.isEmpty == true {
+                node.children = []
+                withAnimation(.easeOut(duration: 0.15)) {
+                    node.isExpanded = true
+                }
+                Task { await node.loadChildrenAsync() }
+            } else {
+                withAnimation(.easeOut(duration: 0.15)) {
+                    node.isExpanded = true
+                }
             }
-            Task { await node.loadChildrenAsync() }
         } else {
             withAnimation(.easeOut(duration: 0.15)) {
-                node.isExpanded.toggle()
+                node.isExpanded = false
             }
         }
     }
