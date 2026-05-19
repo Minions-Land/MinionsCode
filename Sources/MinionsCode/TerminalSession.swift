@@ -22,13 +22,6 @@ enum SessionMode {
         }
     }
 
-    var label: String {
-        switch self {
-        case .shell: return "shell"
-        case .claude: return "claude"
-        case .watch: return "watch"
-        }
-    }
 }
 
 /// Singleton broker for the "you're read-only" toast.
@@ -124,11 +117,9 @@ final class TerminalSession: @unchecked Sendable {
     let terminalView: LocalProcessTerminalView
     let mode: SessionMode
     let id: String
-    /// Initial CWD passed to the child process. Stays constant.
-    let initialCwd: String
-    /// Live CWD as reported by the shell via OSC 7. Falls back to
-    /// `initialCwd` when the shell doesn't emit OSC 7. The file
-    /// explorer reads this via the cwdChanged notification.
+    /// Live CWD. Initialized to whatever was passed to init; updated by
+    /// OSC 7 (hostCurrentDirectoryUpdate) when the shell emits it.
+    /// The file explorer reads this via the .terminalCwdChanged notification.
     private(set) var cwd: String
     var isReadOnly: Bool = false
     private(set) var isRunning = false
@@ -145,7 +136,6 @@ final class TerminalSession: @unchecked Sendable {
             }
         }()
         self.cwd = cwd ?? FileManager.default.homeDirectoryForCurrentUser.path
-        self.initialCwd = self.cwd
 
         self.terminalView = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
         TerminalSession.applyDefaultTheme(to: terminalView)

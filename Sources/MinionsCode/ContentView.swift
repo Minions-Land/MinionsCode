@@ -528,18 +528,6 @@ struct ContentView: View {
         .background(BG_DARKEST.opacity(settings.translucentBackground ? TERMINAL_ALPHA : 1))
     }
 
-    private func statusBadge(label: String, value: String, tint: Color) -> some View {
-        HStack(spacing: 4) {
-            Text(label.uppercased())
-                .font(.system(size: 8, weight: .bold))
-                .tracking(0.5)
-                .foregroundColor(.white.opacity(0.35))
-            Text(value)
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .foregroundColor(tint)
-        }
-    }
-
     /// Row 2 — tabs only, à la Terminal.app. Trailing `+` adds a new shell tab.
     private var tabsRow: some View {
         HStack(spacing: 0) {
