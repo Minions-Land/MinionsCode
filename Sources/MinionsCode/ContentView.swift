@@ -1,26 +1,26 @@
 import SwiftUI
 import AppKit
 
-private let GOLD = Color(red: 1.0, green: 0.78, blue: 0.10)
-private let GOLD_DIM = Color(red: 0.85, green: 0.66, blue: 0.08)
-private let BG_DARKEST = Color(red: 0.04, green: 0.04, blue: 0.05)
-private let BG_DARK = Color(red: 0.07, green: 0.07, blue: 0.08)
-private let BG_MID = Color(red: 0.10, green: 0.10, blue: 0.11)
-private let TEXT_PRIMARY = Color(red: 0.95, green: 0.93, blue: 0.86)
-private let TEXT_DIM = Color.white.opacity(0.5)
-private let TEXT_FAINT = Color.white.opacity(0.25)
+let GOLD = Color(red: 1.0, green: 0.78, blue: 0.10)
+let GOLD_DIM = Color(red: 0.85, green: 0.66, blue: 0.08)
+let BG_DARKEST = Color(red: 0.04, green: 0.04, blue: 0.05)
+let BG_DARK = Color(red: 0.07, green: 0.07, blue: 0.08)
+let BG_MID = Color(red: 0.10, green: 0.10, blue: 0.11)
+let TEXT_PRIMARY = Color(red: 0.95, green: 0.93, blue: 0.86)
+let TEXT_DIM = Color.white.opacity(0.5)
+let TEXT_FAINT = Color.white.opacity(0.25)
 
 /// Two unified opacity levels for chrome (everything that's not the terminal
 /// itself). Top tier is the title-bar / sidebar-header row; mid tier is every
 /// other strip. Same color base, just two alphas — keeps the glass look
 /// consistent without losing visual hierarchy.
-private let CHROME_TOP_ALPHA: Double = 0.55
-private let CHROME_MID_ALPHA: Double = 0.32
+let CHROME_TOP_ALPHA: Double = 0.55
+let CHROME_MID_ALPHA: Double = 0.32
 
 /// Terminal cells render almost transparent so the surface is the lightest
 /// of the three tiers — the visual hierarchy is title bar (deepest) →
 /// chrome → terminal (lightest).
-private let TERMINAL_ALPHA: Double = 0.18
+let TERMINAL_ALPHA: Double = 0.18
 
 struct ContentView: View {
     @State private var manager = SessionManager.shared
@@ -35,6 +35,7 @@ struct ContentView: View {
     @State private var aiSearching = false
     @State private var sidebarCollapsed = true
     @State private var sidebarWidth: CGFloat = 320
+    @State private var explorerCollapsed: Bool = AppSettings.shared.explorerCollapsed
     @State private var orderedTerminalIds: [String] = []
     @State private var showingCloseConfirm = false
     @State private var pendingCloseId: String?
@@ -54,6 +55,13 @@ struct ContentView: View {
             .onChange(of: settings.fontSize) { _, _ in reapplyTheme() }
             .onChange(of: activeTerminalId) { _, _ in syncChromeBridge() }
             .onChange(of: sidebarCollapsed) { _, _ in syncChromeBridge() }
+            .onChange(of: explorerCollapsed) { _, new in
+                settings.explorerCollapsed = new
+                syncChromeBridge()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .toggleFileExplorer)) { _ in
+                withAnimation(.easeInOut(duration: 0.2)) { explorerCollapsed.toggle() }
+            }
             .onChange(of: settings.translucentBackground) { _, _ in
                 applyWindowTranslucency()
                 reapplyTheme()
@@ -104,6 +112,15 @@ struct ContentView: View {
             // top of the screen, exactly like Apple Terminal.
             tabsRow
             HStack(spacing: 0) {
+                if !explorerCollapsed {
+                    FileExplorerPanel(
+                        activeTerminalId: activeTerminalId,
+                        activeTerminalCWD: activeTerminal?.cwd
+                    )
+                    .frame(width: settings.explorerWidth)
+                    .transition(.move(edge: .leading))
+                    ExplorerResizer(width: $settings.explorerWidth)
+                }
                 terminalPanel
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 if !sidebarCollapsed {
@@ -145,6 +162,7 @@ struct ContentView: View {
         let bridge = ChromeBridge.shared
         bridge.activeTerminal = activeTerminal
         bridge.sidebarCollapsed = sidebarCollapsed
+        bridge.explorerCollapsed = explorerCollapsed
         bridge.onShowSettings = { NotificationCenter.default.post(name: .showSettings, object: nil) }
         bridge.onToggleSidebar = { NotificationCenter.default.post(name: .toggleSidebar, object: nil) }
         bridge.onDeleteJunk = {
@@ -821,6 +839,7 @@ final class ChromeBridge {
 
     var activeTerminal: TerminalSession?
     var sidebarCollapsed: Bool = true
+    var explorerCollapsed: Bool = true
     var onShowSettings: () -> Void = {}
     var onToggleSidebar: () -> Void = {}
     var onDeleteJunk: () -> Void = {}
@@ -837,6 +856,17 @@ struct TitlebarLeadingChrome: View {
 
     var body: some View {
         HStack(spacing: 6) {
+            // Explorer toggle — leftmost, mirroring the right-side sidebar toggle
+            Button {
+                NotificationCenter.default.post(name: .toggleFileExplorer, object: nil)
+            } label: {
+                ChromePill(accent: bridge.explorerCollapsed ? nil : GOLD) {
+                    Image(systemName: "sidebar.left").font(.system(size: 11))
+                }
+            }
+            .buttonStyle(.plain)
+            .help(bridge.explorerCollapsed ? "Show Files panel" : "Hide Files panel")
+
             if let terminal = bridge.activeTerminal {
                 if terminal.mode.isWatch {
                     ChromePill(accent: Color.green) {

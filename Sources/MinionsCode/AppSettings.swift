@@ -19,6 +19,10 @@ final class AppSettings {
     private let hideInactiveFoldersKey = "minionscode.hideInactiveFolders"
     private let collapseInactivesKey = "minionscode.collapseInactives"
     private let scrollbackKey = "minionscode.scrollbackLines"
+    private let explorerCollapsedKey = "minionscode.explorerCollapsed"
+    private let explorerWidthKey = "minionscode.explorerWidth"
+    private let explorerAutoFollowKey = "minionscode.explorerAutoFollow"
+    private let pinnedFoldersKey = "minionscode.pinnedFolders"
 
     var fontSize: CGFloat {
         didSet { defaults.set(Double(fontSize), forKey: fontSizeKey) }
@@ -71,6 +75,24 @@ final class AppSettings {
         didSet { defaults.set(scrollbackLines, forKey: scrollbackKey) }
     }
 
+    /// File explorer panel state.
+    var explorerCollapsed: Bool {
+        didSet { defaults.set(explorerCollapsed, forKey: explorerCollapsedKey) }
+    }
+    var explorerWidth: CGFloat {
+        didSet { defaults.set(Double(explorerWidth), forKey: explorerWidthKey) }
+    }
+    /// When true, the explorer's CWD section follows the active terminal's
+    /// current directory automatically. When false, the user picked a
+    /// folder manually and we leave it alone.
+    var explorerAutoFollow: Bool {
+        didSet { defaults.set(explorerAutoFollow, forKey: explorerAutoFollowKey) }
+    }
+    /// Pinned folders shown in the lower section of the explorer.
+    var pinnedFolders: [String] {
+        didSet { defaults.set(pinnedFolders, forKey: pinnedFoldersKey) }
+    }
+
     init() {
         self.fontSize = defaults.object(forKey: fontSizeKey) as? CGFloat ?? 13
         self.theme = Theme(rawValue: defaults.string(forKey: themeKey) ?? "minion") ?? .minion
@@ -83,6 +105,10 @@ final class AppSettings {
         self.hideInactiveFolders = defaults.object(forKey: hideInactiveFoldersKey) as? Bool ?? false
         self.collapseInactivesInFolder = defaults.object(forKey: collapseInactivesKey) as? Bool ?? true
         self.scrollbackLines = defaults.object(forKey: scrollbackKey) as? Int ?? 50_000
+        self.explorerCollapsed = defaults.object(forKey: explorerCollapsedKey) as? Bool ?? true
+        self.explorerWidth = CGFloat(defaults.object(forKey: explorerWidthKey) as? Double ?? 280)
+        self.explorerAutoFollow = defaults.object(forKey: explorerAutoFollowKey) as? Bool ?? true
+        self.pinnedFolders = defaults.object(forKey: pinnedFoldersKey) as? [String] ?? []
     }
 }
 

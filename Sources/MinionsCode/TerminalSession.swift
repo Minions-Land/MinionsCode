@@ -124,7 +124,12 @@ final class TerminalSession: @unchecked Sendable {
     let terminalView: LocalProcessTerminalView
     let mode: SessionMode
     let id: String
-    let cwd: String
+    /// Initial CWD passed to the child process. Stays constant.
+    let initialCwd: String
+    /// Live CWD as reported by the shell via OSC 7. Falls back to
+    /// `initialCwd` when the shell doesn't emit OSC 7. The file
+    /// explorer reads this via the cwdChanged notification.
+    private(set) var cwd: String
     var isReadOnly: Bool = false
     private(set) var isRunning = false
     /// Set when the child process exits. nil = still running, 0 = clean exit, other = error.
@@ -140,6 +145,7 @@ final class TerminalSession: @unchecked Sendable {
             }
         }()
         self.cwd = cwd ?? FileManager.default.homeDirectoryForCurrentUser.path
+        self.initialCwd = self.cwd
 
         self.terminalView = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
         TerminalSession.applyDefaultTheme(to: terminalView)
@@ -302,7 +308,27 @@ final class TerminalSession: @unchecked Sendable {
 extension TerminalSession: LocalProcessTerminalViewDelegate {
     nonisolated func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
     nonisolated func setTerminalTitle(source: LocalProcessTerminalView, title: String) {}
-    nonisolated func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
+    nonisolated func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {
+        guard let dir = directory, !dir.isEmpty else { return }
+        // The shell sends OSC 7 with file://hostname/abs/path or just abs/path.
+        let path: String
+        if dir.hasPrefix("file://") {
+            if let url = URL(string: dir) { path = url.path } else { return }
+        } else {
+            path = dir
+        }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if self.cwd != path {
+                self.cwd = path
+                NotificationCenter.default.post(
+                    name: .terminalCwdChanged,
+                    object: self,
+                    userInfo: ["cwd": path]
+                )
+            }
+        }
+    }
     nonisolated func processTerminated(source: TerminalView, exitCode: Int32?) {
         let code = exitCode
         DispatchQueue.main.async { [weak self] in

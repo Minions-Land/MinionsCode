@@ -78,4 +78,6 @@ extension Notification.Name {
     static let selectTab = Notification.Name("selectTab")
     static let nextTab = Notification.Name("nextTab")
     static let prevTab = Notification.Name("prevTab")
+    static let terminalCwdChanged = Notification.Name("terminalCwdChanged")
+    static let toggleFileExplorer = Notification.Name("toggleFileExplorer")
 }
