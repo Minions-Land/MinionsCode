@@ -45,6 +45,21 @@ struct MinionsCodeApp: App {
                     NotificationCenter.default.post(name: .toggleSidebar, object: nil)
                 }
                 .keyboardShortcut("\\")
+                Button("Toggle File Explorer") {
+                    NotificationCenter.default.post(name: .toggleFileExplorer, object: nil)
+                }
+                .keyboardShortcut("e", modifiers: [.command, .shift])
+                Divider()
+                Button("Minimize") {
+                    NSApp.windows.first?.miniaturize(nil)
+                }
+                .keyboardShortcut("m")
+            }
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") {
+                    NotificationCenter.default.post(name: .showSettings, object: nil)
+                }
+                .keyboardShortcut(",")
             }
             CommandMenu("Tabs") {
                 ForEach(1...9, id: \.self) { i in

@@ -69,7 +69,15 @@ struct ContentView: View {
             .modifier(GlobalNotifications(
                 newShell: newShellSession,
                 toggleSidebar: { withAnimation(.easeInOut(duration: 0.2)) { sidebarCollapsed.toggle() } },
-                closeActive: { if let tid = activeTerminalId { closeTerminal(tid) } },
+                closeActive: {
+                    if let tid = activeTerminalId {
+                        closeTerminal(tid)
+                    }
+                    // If no tabs left after close, minimize to dock
+                    if orderedTerminalIds.isEmpty {
+                        NSApp.windows.first?.miniaturize(nil)
+                    }
+                },
                 showSettings: { showingSettings = true },
                 zoomIn: { settings.fontSize = min(22, settings.fontSize + 1) },
                 zoomOut: { settings.fontSize = max(9, settings.fontSize - 1) },
