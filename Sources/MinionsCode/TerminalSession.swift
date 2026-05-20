@@ -125,6 +125,18 @@ final class TerminalSession: @unchecked Sendable {
     private(set) var isRunning = false
     /// Set when the child process exits. nil = still running, 0 = clean exit, other = error.
     private(set) var exitCode: Int32? = nil
+    /// Name of the deepest descendant process under the PTY's shell. Used by
+    /// the tab to swap shell→claude icon when the user types `claude` inside
+    /// a shell tab. Polled every 3s.
+    private(set) var foregroundProcessName: String? = nil
+    private var foregroundPollTask: Task<Void, Never>? = nil
+
+    /// True when this is a shell tab whose user has launched a claude
+    /// process inside it (covers the `claude`-typed-in-shell case).
+    var hasClaudeChild: Bool {
+        guard case .shell = mode else { return false }
+        return foregroundProcessName == "claude"
+    }
 
     init(mode: SessionMode = .shell, cwd: String? = nil) {
         self.mode = mode
@@ -137,7 +149,7 @@ final class TerminalSession: @unchecked Sendable {
         }()
         self.cwd = cwd ?? FileManager.default.homeDirectoryForCurrentUser.path
 
-        self.terminalView = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        self.terminalView = MinionsTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
         TerminalSession.applyDefaultTheme(to: terminalView)
         terminalView.optionAsMetaKey = true
         // Always render the caret as "focused" regardless of window focus state.
@@ -168,9 +180,14 @@ final class TerminalSession: @unchecked Sendable {
             if let rid = resumeId {
                 args = ["--resume", rid]
             }
-            // Default flags: max effort, opus-4-7, bypass permissions.
-            // User can override via the Run Claude menu for one-off changes.
-            args += ["--effort", "max", "--model", "claude-opus-4-7", "--permission-mode", "bypassPermissions"]
+            // Defaults from AppSettings — user can override via the Run
+            // Claude menu (one-off) or Settings → Claude defaults (persistent).
+            let s = AppSettings.shared
+            args += ["--model", s.defaultClaudeModel,
+                     "--effort", s.defaultEffort,
+                     "--permission-mode", s.defaultPermissionMode]
+            if s.defaultLongContext { args += ["--betas", "context-1m-2025-08-07"] }
+            if s.defaultDangerouslySkipPermissions { args += ["--dangerously-skip-permissions"] }
             terminalView.startProcess(executable: claudePath, args: args, environment: env, execName: "claude", currentDirectory: self.cwd)
         case .watch(let sessionId):
             self.isReadOnly = true
@@ -185,7 +202,71 @@ final class TerminalSession: @unchecked Sendable {
         }
         isRunning = true
         terminalView.processDelegate = self
+        if case .shell = mode { startForegroundPolling() }
     }
+
+    /// Polls every 3s for the deepest descendant under the PTY's shell.
+    /// Stops itself when the process exits. Cheap: ~1ms per tick.
+    private func startForegroundPolling() {
+        foregroundPollTask?.cancel()
+        let pid = terminalView.process.shellPid
+        foregroundPollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                if !self.isRunning { return }
+                let name = await Task.detached(priority: .background) {
+                    TerminalSession.deepestDescendantName(of: pid)
+                }.value
+                if self.foregroundProcessName != name {
+                    self.foregroundProcessName = name
+                    NotificationCenter.default.post(name: .terminalForegroundChanged, object: self)
+                }
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
+    }
+
+    /// Walks the process table once to find the deepest descendant of `root`.
+    /// Returns the executable name (e.g. "claude", "vim") or nil if the only
+    /// running descendant IS root (shell idle). Uses Darwin's proc_listpids.
+    nonisolated static func deepestDescendantName(of root: pid_t) -> String? {
+        if root == 0 { return nil }
+        let bufSize = proc_listpids(UInt32(PROC_ALL_PIDS), 0, nil, 0)
+        guard bufSize > 0 else { return nil }
+        let count = Int(bufSize) / MemoryLayout<pid_t>.size
+        var pids = [pid_t](repeating: 0, count: count)
+        let written = pids.withUnsafeMutableBufferPointer { buf -> Int32 in
+            proc_listpids(UInt32(PROC_ALL_PIDS), 0, buf.baseAddress, bufSize)
+        }
+        guard written > 0 else { return nil }
+        let actual = Int(written) / MemoryLayout<pid_t>.size
+        // Build pid → ppid + pid → name maps
+        var ppid = [pid_t: pid_t]()
+        var name = [pid_t: String]()
+        for p in pids.prefix(actual) where p > 0 {
+            var info = proc_bsdinfo()
+            let r = proc_pidinfo(p, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
+            guard r > 0 else { continue }
+            ppid[p] = pid_t(info.pbi_ppid)
+            // pbi_comm is a fixed 16-byte char buffer; read it as a CString
+            let n = withUnsafePointer(to: info.pbi_comm) { ptr -> String in
+                ptr.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: info.pbi_comm)) { String(cString: $0) }
+            }
+            name[p] = n
+        }
+        // Find descendants of root, depth-first, return deepest (or shallowest non-shell).
+        var descendants: [(pid: pid_t, depth: Int)] = []
+        func walk(_ parent: pid_t, depth: Int) {
+            for (child, par) in ppid where par == parent {
+                descendants.append((child, depth))
+                walk(child, depth: depth + 1)
+            }
+        }
+        walk(root, depth: 1)
+        guard let deepest = descendants.max(by: { $0.depth < $1.depth }) else { return nil }
+        return name[deepest.pid]
+    }
+
 
     func sendCommand(_ command: String) {
         terminalView.send(txt: "\(command)\n")

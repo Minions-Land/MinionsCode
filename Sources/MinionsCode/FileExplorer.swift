@@ -219,7 +219,7 @@ struct FileExplorerPanel: View {
                     .frame(minHeight: 200, idealHeight: 280, maxHeight: 380)
             }
         }
-        .background(BG_DARKEST.opacity(settings.translucentBackground ? CHROME_MID_ALPHA : 1))
+        .background(BG_DARKEST.opacity(settings.translucentBackground ? AppSettings.shared.chromeAlpha : 1))
         .onAppear { rebuildCwdRoot(from: activeTerminalCWD); rebuildPinned() }
         .onChange(of: activeTerminalCWD) { _, new in rebuildCwdRoot(from: new) }
         .onChange(of: settings.explorerAutoFollow) { _, _ in rebuildCwdRoot(from: activeTerminalCWD) }
@@ -249,6 +249,8 @@ struct FileExplorerPanel: View {
                 Text("EXPLORER")
                     .font(.system(size: 9, weight: .heavy))
                     .tracking(0.6)
+                    .lineLimit(1)
+                    .fixedSize()
                     .foregroundColor(.white.opacity(0.5))
                 Spacer()
                 iconButton(systemName: "doc.badge.plus", help: "New File") {
@@ -328,6 +330,8 @@ struct FileExplorerPanel: View {
                     Text("PINNED")
                         .font(.system(size: 9, weight: .heavy))
                         .tracking(0.6)
+                        .lineLimit(1)
+                        .fixedSize()
                         .foregroundColor(.white.opacity(0.4))
                     Spacer()
                     Button {
@@ -386,6 +390,8 @@ struct FileExplorerPanel: View {
             Text(title)
                 .font(.system(size: 9, weight: .heavy))
                 .tracking(0.6)
+                .lineLimit(1)
+                .fixedSize()
                 .foregroundColor(.white.opacity(0.4))
             if let s = subtitle {
                 Text(s)
@@ -638,6 +644,56 @@ struct FileTreeRow: View {
             node.isDirectory ? nil :
             TapGesture(count: 2).onEnded { NSWorkspace.shared.open(node.url) }
         )
+        .contextMenu {
+            Button("Copy Path") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(node.url.path, forType: .string)
+            }
+            Button("Copy Relative Path") {
+                let cwd = FileManager.default.currentDirectoryPath
+                let rel = node.url.path.replacingOccurrences(
+                    of: cwd + "/", with: "", options: .anchored
+                )
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(rel, forType: .string)
+            }
+            Button("Copy File Name") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(node.name, forType: .string)
+            }
+            Divider()
+            Button("Reveal in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting([node.url])
+            }
+            Button("Open in Default App") {
+                NSWorkspace.shared.open(node.url)
+            }
+            if node.isDirectory {
+                Button("Open in Terminal (cd here)") {
+                    let escaped = node.url.path.replacingOccurrences(of: "\"", with: "\\\"")
+                    NotificationCenter.default.post(
+                        name: .explorerCdRequest,
+                        object: nil,
+                        userInfo: ["path": escaped]
+                    )
+                }
+                Button("Pin to Explorer") {
+                    NotificationCenter.default.post(
+                        name: .explorerPinRequest,
+                        object: nil,
+                        userInfo: ["path": node.url.path]
+                    )
+                }
+            }
+            Divider()
+            Button("Rename") {
+                renameText = node.name
+                renaming = node.url
+            }
+            Button("Move to Trash", role: .destructive) {
+                pendingDelete = node.url
+            }
+        }
     }
 
     private var hoverActions: some View {
@@ -720,6 +776,8 @@ struct FileTreeRow: View {
 
 extension Notification.Name {
     static let explorerNewFileInFolder = Notification.Name("explorerNewFileInFolder")
+    static let explorerCdRequest = Notification.Name("explorerCdRequest")
+    static let explorerPinRequest = Notification.Name("explorerPinRequest")
 }
 
 // MARK: - Resizer (left edge of explorer)

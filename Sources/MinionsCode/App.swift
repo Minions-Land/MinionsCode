@@ -95,4 +95,5 @@ extension Notification.Name {
     static let prevTab = Notification.Name("prevTab")
     static let terminalCwdChanged = Notification.Name("terminalCwdChanged")
     static let toggleFileExplorer = Notification.Name("toggleFileExplorer")
+    static let terminalForegroundChanged = Notification.Name("terminalForegroundChanged")
 }

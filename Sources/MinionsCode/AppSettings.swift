@@ -24,6 +24,19 @@ final class AppSettings {
     private let explorerAutoFollowKey = "minionscode.explorerAutoFollow"
     private let pinnedFoldersKey = "minionscode.pinnedFolders"
 
+    // Claude defaults
+    private let defaultModelKey = "minionscode.defaultModel"
+    private let defaultEffortKey = "minionscode.defaultEffort"
+    private let defaultPermissionModeKey = "minionscode.defaultPermissionMode"
+    private let defaultLongContextKey = "minionscode.defaultLongContext"
+    private let defaultBypassKey = "minionscode.defaultBypass"
+
+    // Layout
+    private let tabBarHeightKey = "minionscode.tabBarHeight"
+    private let sidebarWidthKey = "minionscode.sidebarWidth"
+    private let terminalAlphaKey = "minionscode.terminalAlpha"
+    private let chromeAlphaKey = "minionscode.chromeAlpha"
+
     var fontSize: CGFloat {
         didSet { defaults.set(Double(fontSize), forKey: fontSizeKey) }
     }
@@ -93,6 +106,50 @@ final class AppSettings {
         didSet { defaults.set(pinnedFolders, forKey: pinnedFoldersKey) }
     }
 
+    // MARK: Claude defaults (used by sidebar resume + new claude tab)
+
+    /// Model alias used by sidebar-launched / new-tab claude. Free-form so
+    /// new model names work without recompile (e.g. "claude-opus-4-7").
+    var defaultClaudeModel: String {
+        didSet { defaults.set(defaultClaudeModel, forKey: defaultModelKey) }
+    }
+    /// Effort: low / medium / high / xhigh / max — passed to --effort.
+    var defaultEffort: String {
+        didSet { defaults.set(defaultEffort, forKey: defaultEffortKey) }
+    }
+    /// Permission mode: default / acceptEdits / auto / bypassPermissions / dontAsk / plan.
+    var defaultPermissionMode: String {
+        didSet { defaults.set(defaultPermissionMode, forKey: defaultPermissionModeKey) }
+    }
+    /// Pass --betas context-1m-2025-08-07 by default for sidebar/new claude.
+    var defaultLongContext: Bool {
+        didSet { defaults.set(defaultLongContext, forKey: defaultLongContextKey) }
+    }
+    /// Pass --dangerously-skip-permissions on every default launch.
+    var defaultDangerouslySkipPermissions: Bool {
+        didSet { defaults.set(defaultDangerouslySkipPermissions, forKey: defaultBypassKey) }
+    }
+
+    // MARK: Layout
+
+    /// Tab strip height in points. Affects all open terminals.
+    var tabBarHeight: CGFloat {
+        didSet { defaults.set(Double(tabBarHeight), forKey: tabBarHeightKey) }
+    }
+    /// Default width of the right session sidebar (in points).
+    var sidebarWidth: CGFloat {
+        didSet { defaults.set(Double(sidebarWidth), forKey: sidebarWidthKey) }
+    }
+    /// Alpha multiplier for the terminal cell background (0 = fully
+    /// transparent → 1 = opaque).
+    var terminalAlpha: Double {
+        didSet { defaults.set(terminalAlpha, forKey: terminalAlphaKey) }
+    }
+    /// Alpha multiplier for the chrome strips (tab bar, sidebars).
+    var chromeAlpha: Double {
+        didSet { defaults.set(chromeAlpha, forKey: chromeAlphaKey) }
+    }
+
     init() {
         self.fontSize = defaults.object(forKey: fontSizeKey) as? CGFloat ?? 13
         self.theme = Theme(rawValue: defaults.string(forKey: themeKey) ?? "minion") ?? .minion
@@ -109,6 +166,15 @@ final class AppSettings {
         self.explorerWidth = CGFloat(defaults.object(forKey: explorerWidthKey) as? Double ?? 280)
         self.explorerAutoFollow = defaults.object(forKey: explorerAutoFollowKey) as? Bool ?? true
         self.pinnedFolders = defaults.object(forKey: pinnedFoldersKey) as? [String] ?? []
+        self.defaultClaudeModel = defaults.string(forKey: defaultModelKey) ?? "claude-opus-4-7"
+        self.defaultEffort = defaults.string(forKey: defaultEffortKey) ?? "max"
+        self.defaultPermissionMode = defaults.string(forKey: defaultPermissionModeKey) ?? "bypassPermissions"
+        self.defaultLongContext = defaults.object(forKey: defaultLongContextKey) as? Bool ?? true
+        self.defaultDangerouslySkipPermissions = defaults.object(forKey: defaultBypassKey) as? Bool ?? false
+        self.tabBarHeight = CGFloat(defaults.object(forKey: tabBarHeightKey) as? Double ?? 40)
+        self.sidebarWidth = CGFloat(defaults.object(forKey: sidebarWidthKey) as? Double ?? 320)
+        self.terminalAlpha = (defaults.object(forKey: terminalAlphaKey) as? Double) ?? 0.18
+        self.chromeAlpha = (defaults.object(forKey: chromeAlphaKey) as? Double) ?? 0.32
     }
 }
 

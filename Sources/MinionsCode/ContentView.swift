@@ -34,7 +34,7 @@ struct ContentView: View {
     @State private var aiSearchHint: String?
     @State private var aiSearching = false
     @State private var sidebarCollapsed = true
-    @State private var sidebarWidth: CGFloat = 320
+    @State private var sidebarWidth: CGFloat = AppSettings.shared.sidebarWidth
     @State private var explorerCollapsed: Bool = AppSettings.shared.explorerCollapsed
     @State private var orderedTerminalIds: [String] = []
     @State private var showingCloseConfirm = false
@@ -61,6 +61,17 @@ struct ContentView: View {
             }
             .onReceive(NotificationCenter.default.publisher(for: .toggleFileExplorer)) { _ in
                 withAnimation(.easeInOut(duration: 0.2)) { explorerCollapsed.toggle() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .explorerCdRequest)) { note in
+                guard let path = note.userInfo?["path"] as? String,
+                      let tid = activeTerminalId,
+                      let t = terminals[tid] else { return }
+                t.terminalView.send(txt: "cd \"\(path)\"\n")
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .explorerPinRequest)) { note in
+                guard let path = note.userInfo?["path"] as? String,
+                      !settings.pinnedFolders.contains(path) else { return }
+                settings.pinnedFolders.append(path)
             }
             .onChange(of: settings.translucentBackground) { _, _ in
                 applyWindowTranslucency()
@@ -148,7 +159,7 @@ struct ContentView: View {
                 VisualEffectBackground(material: .hudWindow, blendingMode: .behindWindow)
                 // Match terminal alpha so the area behind sidebar resizer / margins
                 // is the same lightness as the terminal — no bright seam.
-                BG_DARKEST.opacity(TERMINAL_ALPHA)
+                BG_DARKEST.opacity(AppSettings.shared.terminalAlpha)
             }
         } else {
             BG_DARKEST
@@ -273,37 +284,39 @@ struct ContentView: View {
             Divider().background(Color.white.opacity(0.05))
             sidebarFooter
         }
-        .background(BG_DARKEST.opacity(settings.translucentBackground ? CHROME_MID_ALPHA : 1))
+        .background(BG_DARKEST.opacity(settings.translucentBackground ? AppSettings.shared.chromeAlpha : 1))
     }
 
     private var filterBar: some View {
         VStack(spacing: 4) {
-            HStack(spacing: 6) {
-                FilterChip(label: "\(settings.historyHorizonDays)d", systemImage: "calendar", isOn: true) {
-                    let next = (settings.historyHorizonDays == 7) ? 30 :
-                               (settings.historyHorizonDays == 30) ? 1 :
-                               (settings.historyHorizonDays == 1) ? 3 : 7
-                    settings.historyHorizonDays = next
-                    manager.scan()
-                }
-                FilterChip(label: "Empty", systemImage: "tray", isOn: !settings.hideEmptyFolders) {
-                    settings.hideEmptyFolders.toggle()
-                }
-                FilterChip(label: "Inactive", systemImage: "moon.zzz", isOn: !settings.hideInactiveFolders) {
-                    settings.hideInactiveFolders.toggle()
-                }
-                FilterChip(label: "Collapse", systemImage: "rectangle.compress.vertical", isOn: settings.collapseInactivesInFolder) {
-                    settings.collapseInactivesInFolder.toggle()
-                }
-                Spacer()
-            }
-            HStack(spacing: 6) {
-                ForEach(ModelFamilyFilter.allCases, id: \.self) { f in
-                    ModelFilterChip(filter: f, isOn: modelFilter == f) {
-                        modelFilter = (modelFilter == f) ? .all : f
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    FilterChip(label: "\(settings.historyHorizonDays)d", systemImage: "calendar", isOn: true) {
+                        let next = (settings.historyHorizonDays == 7) ? 30 :
+                                   (settings.historyHorizonDays == 30) ? 1 :
+                                   (settings.historyHorizonDays == 1) ? 3 : 7
+                        settings.historyHorizonDays = next
+                        manager.scan()
+                    }
+                    FilterChip(label: "Empty", systemImage: "tray", isOn: !settings.hideEmptyFolders) {
+                        settings.hideEmptyFolders.toggle()
+                    }
+                    FilterChip(label: "Inactive", systemImage: "moon.zzz", isOn: !settings.hideInactiveFolders) {
+                        settings.hideInactiveFolders.toggle()
+                    }
+                    FilterChip(label: "Collapse", systemImage: "rectangle.compress.vertical", isOn: settings.collapseInactivesInFolder) {
+                        settings.collapseInactivesInFolder.toggle()
                     }
                 }
-                Spacer()
+            }
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(ModelFamilyFilter.allCases, id: \.self) { f in
+                        ModelFilterChip(filter: f, isOn: modelFilter == f) {
+                            modelFilter = (modelFilter == f) ? .all : f
+                        }
+                    }
+                }
             }
         }
         .padding(.horizontal, 10)
@@ -510,7 +523,7 @@ struct ContentView: View {
                     .background(
                         // Lightest of the three tiers — chrome above, padding-margin
                         // here matches the cell area so the terminal is one surface.
-                        BG_DARKEST.opacity(settings.translucentBackground ? TERMINAL_ALPHA : 1)
+                        BG_DARKEST.opacity(settings.translucentBackground ? AppSettings.shared.terminalAlpha : 1)
                     )
             } else {
                 emptyState
@@ -525,7 +538,7 @@ struct ContentView: View {
                 }
             )
         }
-        .background(BG_DARKEST.opacity(settings.translucentBackground ? TERMINAL_ALPHA : 1))
+        .background(BG_DARKEST.opacity(settings.translucentBackground ? AppSettings.shared.terminalAlpha : 1))
     }
 
     /// Row 2 — tabs only, à la Terminal.app. Trailing `+` adds a new shell tab.
@@ -572,8 +585,8 @@ struct ContentView: View {
                 .padding(.vertical, 5)
             }
         }
-        .frame(height: 32)
-        .background(BG_DARKEST.opacity(settings.translucentBackground ? CHROME_MID_ALPHA : 1))
+        .frame(height: settings.tabBarHeight)
+        .background(BG_DARKEST.opacity(settings.translucentBackground ? AppSettings.shared.chromeAlpha : 1))
     }
 
     private func nameForTerminal(_ t: TerminalSession) -> String {
@@ -868,7 +881,7 @@ struct TitlebarLeadingChrome: View {
                     ChromePill(accent: Color.green) {
                         HStack(spacing: 4) {
                             Image(systemName: "eye.fill").font(.system(size: 11))
-                            Text("read-only").font(.system(size: 11, weight: .medium))
+                            Text("read-only").font(.system(size: 11, weight: .medium)).lineLimit(1).fixedSize()
                         }
                     }
                 } else {
@@ -1048,7 +1061,7 @@ struct CdFolderButton: View {
             ChromePill {
                 HStack(spacing: 4) {
                     Image(systemName: "folder").font(.system(size: 11))
-                    Text("cd").font(.system(size: 11, weight: .medium, design: .monospaced))
+                    Text("cd").font(.system(size: 11, weight: .medium, design: .monospaced)).lineLimit(1).fixedSize()
                 }
             }
         }
@@ -1088,6 +1101,8 @@ struct ReadOnlyToggle: View {
                         .font(.system(size: 11))
                     Text(readOnly ? "Read-only" : "Editing")
                         .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                        .fixedSize()
                 }
             }
         }
@@ -1114,6 +1129,7 @@ struct ClaudeLaunchMenu: View {
     @State private var worktreeEnabled = false
     @State private var worktreeName: String = ""
     @State private var print: String = ""
+    @State private var enableLongContext = true
 
     enum ClaudeModel: String, CaseIterable, Identifiable {
         case auto, opus, opus47, sonnet, sonnet46, haiku, haiku45
@@ -1214,6 +1230,7 @@ struct ClaudeLaunchMenu: View {
         if let f = effort.flag { parts.append(f) }
         if let f = permissionMode.flag { parts.append(f) }
         if dangerouslySkipPermissions { parts.append("--dangerously-skip-permissions") }
+        if enableLongContext { parts.append("--betas context-1m-2025-08-07") }
         if verbose { parts.append("--verbose") }
         if let f = resumeMode.flag { parts.append(f) }
         if forkSession && resumeMode != .none { parts.append("--fork-session") }
@@ -1239,7 +1256,10 @@ struct ClaudeLaunchMenu: View {
             ChromePill(accent: Color(red: 1.0, green: 0.78, blue: 0.10)) {
                 HStack(spacing: 4) {
                     Image(systemName: "sparkles").font(.system(size: 11))
-                    Text("Run Claude").font(.system(size: 11, weight: .semibold))
+                    Text("Run Claude")
+                        .font(.system(size: 11, weight: .semibold))
+                        .lineLimit(1)
+                        .fixedSize()
                     Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
                 }
             }
@@ -1294,6 +1314,10 @@ struct ClaudeLaunchMenu: View {
                         }
                         Toggle(isOn: $verbose) {
                             Text("--verbose")
+                                .font(.system(size: 11, design: .monospaced))
+                        }
+                        Toggle(isOn: $enableLongContext) {
+                            Text("--betas context-1m  (1M context)")
                                 .font(.system(size: 11, design: .monospaced))
                         }
                     }
@@ -1448,9 +1472,15 @@ struct TabChip: View {
     let onClose: () -> Void
     let onMoveToNewWindow: () -> Void
     @State private var isHovering = false
+    @State private var foregroundTick = 0
 
     private var statusIcon: (name: String, color: Color) {
         if terminal.isRunning {
+            // Shell tab that has launched a `claude` child process gets the
+            // sparkles icon, like a real claude tab.
+            if terminal.hasClaudeChild {
+                return ("sparkles", isActive ? GOLD : .white.opacity(0.5))
+            }
             switch terminal.mode {
             case .shell:    return ("terminal", isActive ? GOLD : .white.opacity(0.5))
             case .claude:   return ("sparkles", isActive ? GOLD : .white.opacity(0.5))
@@ -1469,26 +1499,26 @@ struct TabChip: View {
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: statusIcon.name)
-                .font(.system(size: 10))
+                .font(.system(size: 11))
                 .foregroundColor(statusIcon.color)
             Text(sessionName)
-                .font(.system(size: 11, weight: isActive ? .semibold : .regular))
+                .font(.system(size: 12, weight: isActive ? .semibold : .regular))
                 .foregroundColor(isActive ? .white : .white.opacity(0.6))
                 .lineLimit(1)
                 .truncationMode(.tail)
             Button(action: onClose) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 8, weight: .bold))
-                    .frame(width: 14, height: 14)
+                    .font(.system(size: 9, weight: .bold))
+                    .frame(width: 16, height: 16)
                     .background(Circle().fill(isHovering ? Color.white.opacity(0.1) : Color.clear))
                     .foregroundColor(.white.opacity(isHovering ? 0.8 : 0.4))
             }
             .buttonStyle(.plain)
             .onHover { isHovering = $0 }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .frame(minWidth: 100, maxWidth: 200)
+        .padding(.horizontal, 11)
+        .padding(.vertical, 7)
+        .frame(minWidth: 120, maxWidth: 220)
         .background(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(isActive ? Color(red: 1.0, green: 0.78, blue: 0.10).opacity(0.12) : Color.white.opacity(0.03))
@@ -1503,6 +1533,11 @@ struct TabChip: View {
             Button("Move to New Window") { onMoveToNewWindow() }
             Divider()
             Button("Close Tab", role: .destructive) { onClose() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .terminalForegroundChanged)) { note in
+            if let s = note.object as? TerminalSession, s.id == terminal.id {
+                foregroundTick &+= 1
+            }
         }
     }
 }
@@ -1519,7 +1554,7 @@ struct DetachedWindowView: View {
                 settings.translucentBackground
                     ? AnyView(ZStack {
                         VisualEffectBackground(material: .hudWindow, blendingMode: .behindWindow)
-                        BG_DARKEST.opacity(TERMINAL_ALPHA)
+                        BG_DARKEST.opacity(AppSettings.shared.terminalAlpha)
                     })
                     : AnyView(BG_DARKEST)
             )
@@ -1848,60 +1883,160 @@ struct SettingsSheet: View {
     @State private var settings = AppSettings.shared
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text("Settings").font(.system(size: 16, weight: .bold))
-                Spacer()
-                Button { isPresented = false } label: {
-                    Image(systemName: "xmark.circle.fill").font(.system(size: 16))
-                }
-                .buttonStyle(.plain).foregroundColor(.white.opacity(0.5))
-            }
-            Divider()
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Appearance").font(.system(size: 11, weight: .bold)).tracking(0.5).foregroundColor(.white.opacity(0.5))
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
                 HStack {
-                    Text("Font Size")
+                    Text("Settings").font(.system(size: 16, weight: .bold))
                     Spacer()
-                    Stepper("\(Int(settings.fontSize))pt", value: $settings.fontSize, in: 9...22, step: 1)
-                        .labelsHidden()
-                    Text("\(Int(settings.fontSize))pt").frame(width: 40)
-                        .font(.system(.body, design: .monospaced))
-                }
-                HStack {
-                    Text("Theme")
-                    Spacer()
-                    Picker("", selection: $settings.theme) {
-                        ForEach(Theme.allCases, id: \.self) { t in Text(t.displayName).tag(t) }
+                    Button { isPresented = false } label: {
+                        Image(systemName: "xmark.circle.fill").font(.system(size: 16))
                     }
-                    .labelsHidden().frame(width: 200)
+                    .buttonStyle(.plain).foregroundColor(.white.opacity(0.5))
                 }
-                Toggle("Translucent terminal background", isOn: $settings.translucentBackground)
+                Divider()
+                appearanceSection
+                Divider()
+                layoutSection
+                Divider()
+                claudeDefaultsSection
+                Divider()
+                behaviorSection
             }
-            Divider()
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Behavior").font(.system(size: 11, weight: .bold)).tracking(0.5).foregroundColor(.white.opacity(0.5))
-                Toggle("Group sessions by directory", isOn: $settings.groupByDirectory)
-                Toggle("Notify when Claude finishes", isOn: $settings.notificationsEnabled)
-                Toggle("Play sound on completion", isOn: $settings.soundEnabled).disabled(!settings.notificationsEnabled)
-                HStack {
-                    Text("Scrollback (lines)").font(.system(size: 12))
-                    Spacer()
-                    Stepper(
-                        "\(settings.scrollbackLines.formatted())",
-                        value: $settings.scrollbackLines,
-                        in: 1_000...500_000,
-                        step: 5_000
-                    )
-                    .help("Applies to new tabs. Larger values use more memory.")
-                }
-            }
-            Spacer()
+            .padding(20)
         }
-        .padding(20)
-        .frame(width: 460, height: 400)
+        .frame(width: 520, height: 640)
         .background(BG_DARK)
         .preferredColorScheme(.dark)
+    }
+
+    private var appearanceSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("Appearance")
+            stepperRow("Font Size", value: Binding(
+                get: { Double(settings.fontSize) },
+                set: { settings.fontSize = CGFloat($0) }
+            ), range: 9...22, step: 1, suffix: "pt")
+            HStack {
+                Text("Theme")
+                Spacer()
+                Picker("", selection: $settings.theme) {
+                    ForEach(Theme.allCases, id: \.self) { t in Text(t.displayName).tag(t) }
+                }
+                .labelsHidden().frame(width: 200)
+            }
+            Toggle("Translucent terminal background", isOn: $settings.translucentBackground)
+            sliderRow("Terminal opacity", value: $settings.terminalAlpha, range: 0.0...1.0)
+            sliderRow("Chrome opacity", value: $settings.chromeAlpha, range: 0.0...1.0)
+        }
+    }
+
+    private var layoutSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("Layout")
+            stepperRow("Tab bar height", value: Binding(
+                get: { Double(settings.tabBarHeight) },
+                set: { settings.tabBarHeight = CGFloat($0) }
+            ), range: 28...60, step: 2, suffix: "pt")
+            stepperRow("Sidebar default width", value: Binding(
+                get: { Double(settings.sidebarWidth) },
+                set: { settings.sidebarWidth = CGFloat($0) }
+            ), range: 220...500, step: 10, suffix: "pt")
+            stepperRow("Explorer default width", value: Binding(
+                get: { Double(settings.explorerWidth) },
+                set: { settings.explorerWidth = CGFloat($0) }
+            ), range: 180...600, step: 10, suffix: "pt")
+        }
+    }
+
+    private var claudeDefaultsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("Claude defaults (sidebar resume + new claude tab)")
+            HStack {
+                Text("Model")
+                Spacer()
+                TextField("", text: $settings.defaultClaudeModel)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(width: 220)
+            }
+            HStack {
+                Text("Effort")
+                Spacer()
+                Picker("", selection: $settings.defaultEffort) {
+                    ForEach(["low", "medium", "high", "xhigh", "max"], id: \.self) {
+                        Text($0).tag($0)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 220)
+            }
+            HStack {
+                Text("Permission mode")
+                Spacer()
+                Picker("", selection: $settings.defaultPermissionMode) {
+                    ForEach(["default", "acceptEdits", "auto", "bypassPermissions", "dontAsk", "plan"], id: \.self) {
+                        Text($0).tag($0)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 220)
+            }
+            Toggle("Enable 1M context (--betas context-1m-...)", isOn: $settings.defaultLongContext)
+            Toggle("Pass --dangerously-skip-permissions", isOn: $settings.defaultDangerouslySkipPermissions)
+        }
+    }
+
+    private var behaviorSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("Behavior")
+            Toggle("Group sessions by directory", isOn: $settings.groupByDirectory)
+            Toggle("Notify when Claude finishes", isOn: $settings.notificationsEnabled)
+            Toggle("Play sound on completion", isOn: $settings.soundEnabled).disabled(!settings.notificationsEnabled)
+            stepperRow("History horizon", value: Binding(
+                get: { Double(settings.historyHorizonDays) },
+                set: { settings.historyHorizonDays = Int($0) }
+            ), range: 1...90, step: 1, suffix: "d")
+            stepperRow("Scrollback", value: Binding(
+                get: { Double(settings.scrollbackLines) },
+                set: { settings.scrollbackLines = Int($0) }
+            ), range: 1_000...500_000, step: 5_000, suffix: " lines")
+        }
+    }
+
+    private func sectionHeader(_ s: String) -> some View {
+        Text(s)
+            .font(.system(size: 11, weight: .bold))
+            .tracking(0.5)
+            .foregroundColor(.white.opacity(0.5))
+    }
+
+    private func stepperRow(_ label: String, value: Binding<Double>, range: ClosedRange<Double>, step: Double, suffix: String) -> some View {
+        HStack {
+            Text(label).font(.system(size: 12))
+            Spacer()
+            Stepper("", value: value, in: range, step: step).labelsHidden()
+            Text("\(formatNumber(value.wrappedValue))\(suffix)")
+                .frame(width: 90, alignment: .trailing)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(.white.opacity(0.7))
+        }
+    }
+
+    private func sliderRow(_ label: String, value: Binding<Double>, range: ClosedRange<Double>) -> some View {
+        HStack {
+            Text(label).font(.system(size: 12))
+            Spacer()
+            Slider(value: value, in: range).frame(width: 200)
+            Text(String(format: "%.2f", value.wrappedValue))
+                .frame(width: 50, alignment: .trailing)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(.white.opacity(0.7))
+        }
+    }
+
+    private func formatNumber(_ d: Double) -> String {
+        if d == d.rounded() { return Int(d).formatted() }
+        return String(format: "%.1f", d)
     }
 }
 
@@ -2035,6 +2170,8 @@ struct ModelFilterChip: View {
             Text(filter.label)
                 .font(.system(size: 10, weight: .heavy, design: .monospaced))
                 .tracking(0.4)
+                .lineLimit(1)
+                .fixedSize()
                 .padding(.horizontal, 8).padding(.vertical, 3)
                 .background(
                     Capsule().fill(isOn ? filter.color.opacity(0.22) : Color.white.opacity(0.04))
@@ -2055,7 +2192,10 @@ struct FilterChip: View {
         Button(action: action) {
             HStack(spacing: 3) {
                 Image(systemName: systemImage).font(.system(size: 9))
-                Text(label).font(.system(size: 10, weight: .semibold))
+                Text(label)
+                    .font(.system(size: 10, weight: .semibold))
+                    .lineLimit(1)
+                    .fixedSize()
             }
             .padding(.horizontal, 7).padding(.vertical, 3)
             .background(
