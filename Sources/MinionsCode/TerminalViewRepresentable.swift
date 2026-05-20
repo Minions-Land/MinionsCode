@@ -79,6 +79,15 @@ final class ClickableTerminalView: NSView {
     let terminalView: LocalProcessTerminalView
     weak var session: TerminalSession?
 
+    /// Wrapper itself never accepts first-responder status — focus always
+    /// belongs to the inner SwiftTerm view, so dictation, IME, and
+    /// NSTextInputClient calls reach the right target.
+    override var acceptsFirstResponder: Bool { false }
+    /// First-mouse: accept the click even if we're not key, so a single
+    /// click in an unfocused window both raises the window AND focuses
+    /// the terminal — same as Apple Terminal.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     init(session: TerminalSession) {
         self.session = session
         self.terminalView = session.terminalView

@@ -129,6 +129,15 @@ final class TerminalSession: @unchecked Sendable {
     /// the tab to swap shell→claude icon when the user types `claude` inside
     /// a shell tab. Polled every 3s.
     private(set) var foregroundProcessName: String? = nil
+    /// PID of the deepest descendant. Used to look up the live session ID
+    /// from ~/.claude/sessions/<pid>.json — that way `/clear` (which keeps
+    /// the same PID but issues a new session ID) is reflected in the tab.
+    private(set) var foregroundProcessPID: pid_t? = nil
+    /// Live Claude session ID for this terminal. For `.claude(resumeId:)`
+    /// tabs this starts as the resume ID; for `.shell` tabs that have a
+    /// claude child it's the live session ID. Updated by polling so /clear
+    /// is reflected.
+    private(set) var currentSessionId: String? = nil
     private var foregroundPollTask: Task<Void, Never>? = nil
 
     /// True when this is a shell tab whose user has launched a claude
@@ -202,23 +211,39 @@ final class TerminalSession: @unchecked Sendable {
         }
         isRunning = true
         terminalView.processDelegate = self
-        if case .shell = mode { startForegroundPolling() }
+        // Seed currentSessionId from the mode (if any) so the sidebar/tab
+        // can display the right session right away.
+        currentSessionId = mode.sessionId
+        // Always poll: shell tabs may launch claude later, claude tabs
+        // may /clear (same PID, new sessionId).
+        startForegroundPolling()
     }
 
     /// Polls every 3s for the deepest descendant under the PTY's shell.
     /// Stops itself when the process exits. Cheap: ~1ms per tick.
     private func startForegroundPolling() {
         foregroundPollTask?.cancel()
-        let pid = terminalView.process.shellPid
+        let rootPid = terminalView.process.shellPid
+        let initialSessionId = mode.sessionId
         foregroundPollTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
                 if !self.isRunning { return }
-                let name = await Task.detached(priority: .background) {
-                    TerminalSession.deepestDescendantName(of: pid)
+                let result = await Task.detached(priority: .background) {
+                    TerminalSession.deepestDescendantInfo(of: rootPid)
                 }.value
-                if self.foregroundProcessName != name {
-                    self.foregroundProcessName = name
+                let claudePid: pid_t? = result?.name == "claude" ? result?.pid : nil
+                let liveSessionId = await Task.detached(priority: .background) {
+                    TerminalSession.liveSessionId(forPID: claudePid)
+                }.value ?? initialSessionId
+
+                let nameChanged = self.foregroundProcessName != result?.name
+                let pidChanged = self.foregroundProcessPID != claudePid
+                let sessionChanged = self.currentSessionId != liveSessionId
+                if nameChanged || pidChanged || sessionChanged {
+                    self.foregroundProcessName = result?.name
+                    self.foregroundProcessPID = claudePid
+                    self.currentSessionId = liveSessionId
                     NotificationCenter.default.post(name: .terminalForegroundChanged, object: self)
                 }
                 try? await Task.sleep(for: .seconds(3))
@@ -226,10 +251,25 @@ final class TerminalSession: @unchecked Sendable {
         }
     }
 
+    /// Reads `~/.claude/sessions/<pid>.json` and returns the current
+    /// sessionId for that PID, if the file exists and the PID is alive.
+    /// Used so `/clear` (same PID, new sessionId) is reflected in the tab.
+    nonisolated static func liveSessionId(forPID pid: pid_t?) -> String? {
+        guard let pid = pid, pid > 0 else { return nil }
+        let path = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/sessions/\(pid).json")
+        guard let data = try? Data(contentsOf: path),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let sid = json["sessionId"] as? String, !sid.isEmpty else { return nil }
+        return sid
+    }
+
     /// Walks the process table once to find the deepest descendant of `root`.
-    /// Returns the executable name (e.g. "claude", "vim") or nil if the only
-    /// running descendant IS root (shell idle). Uses Darwin's proc_listpids.
-    nonisolated static func deepestDescendantName(of root: pid_t) -> String? {
+    /// Walks the process table once to find the deepest descendant of `root`.
+    /// Returns the executable name + pid (e.g. ("claude", 1234)), or nil if
+    /// the only running descendant IS root (shell idle). Uses Darwin's
+    /// proc_listpids.
+    nonisolated static func deepestDescendantInfo(of root: pid_t) -> (name: String, pid: pid_t)? {
         if root == 0 { return nil }
         let bufSize = proc_listpids(UInt32(PROC_ALL_PIDS), 0, nil, 0)
         guard bufSize > 0 else { return nil }
@@ -240,7 +280,6 @@ final class TerminalSession: @unchecked Sendable {
         }
         guard written > 0 else { return nil }
         let actual = Int(written) / MemoryLayout<pid_t>.size
-        // Build pid → ppid + pid → name maps
         var ppid = [pid_t: pid_t]()
         var name = [pid_t: String]()
         for p in pids.prefix(actual) where p > 0 {
@@ -248,13 +287,11 @@ final class TerminalSession: @unchecked Sendable {
             let r = proc_pidinfo(p, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
             guard r > 0 else { continue }
             ppid[p] = pid_t(info.pbi_ppid)
-            // pbi_comm is a fixed 16-byte char buffer; read it as a CString
             let n = withUnsafePointer(to: info.pbi_comm) { ptr -> String in
                 ptr.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: info.pbi_comm)) { String(cString: $0) }
             }
             name[p] = n
         }
-        // Find descendants of root, depth-first, return deepest (or shallowest non-shell).
         var descendants: [(pid: pid_t, depth: Int)] = []
         func walk(_ parent: pid_t, depth: Int) {
             for (child, par) in ppid where par == parent {
@@ -263,8 +300,9 @@ final class TerminalSession: @unchecked Sendable {
             }
         }
         walk(root, depth: 1)
-        guard let deepest = descendants.max(by: { $0.depth < $1.depth }) else { return nil }
-        return name[deepest.pid]
+        guard let deepest = descendants.max(by: { $0.depth < $1.depth }),
+              let n = name[deepest.pid] else { return nil }
+        return (n, deepest.pid)
     }
 
 

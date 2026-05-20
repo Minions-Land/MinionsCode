@@ -96,4 +96,5 @@ extension Notification.Name {
     static let terminalCwdChanged = Notification.Name("terminalCwdChanged")
     static let toggleFileExplorer = Notification.Name("toggleFileExplorer")
     static let terminalForegroundChanged = Notification.Name("terminalForegroundChanged")
+    static let openSourceControl = Notification.Name("openSourceControl")
 }

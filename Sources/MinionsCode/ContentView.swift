@@ -22,6 +22,18 @@ let CHROME_MID_ALPHA: Double = 0.32
 /// chrome → terminal (lightest).
 let TERMINAL_ALPHA: Double = 0.18
 
+enum LeftPanelMode: String, CaseIterable, Identifiable {
+    case files = "Files"
+    case git = "Source Control"
+    var id: String { rawValue }
+    var iconName: String {
+        switch self {
+        case .files: return "folder"
+        case .git: return "arrow.triangle.branch"
+        }
+    }
+}
+
 struct ContentView: View {
     @State private var manager = SessionManager.shared
     @State private var settings = AppSettings.shared
@@ -36,6 +48,7 @@ struct ContentView: View {
     @State private var sidebarCollapsed = true
     @State private var sidebarWidth: CGFloat = AppSettings.shared.sidebarWidth
     @State private var explorerCollapsed: Bool = AppSettings.shared.explorerCollapsed
+    @State private var leftPanelMode: LeftPanelMode = .files
     @State private var orderedTerminalIds: [String] = []
     @State private var showingCloseConfirm = false
     @State private var pendingCloseId: String?
@@ -61,6 +74,12 @@ struct ContentView: View {
             }
             .onReceive(NotificationCenter.default.publisher(for: .toggleFileExplorer)) { _ in
                 withAnimation(.easeInOut(duration: 0.2)) { explorerCollapsed.toggle() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openSourceControl)) { _ in
+                leftPanelMode = .git
+                if explorerCollapsed {
+                    withAnimation(.easeInOut(duration: 0.2)) { explorerCollapsed = false }
+                }
             }
             .onReceive(NotificationCenter.default.publisher(for: .explorerCdRequest)) { note in
                 guard let path = note.userInfo?["path"] as? String,
@@ -132,12 +151,9 @@ struct ContentView: View {
             tabsRow
             HStack(spacing: 0) {
                 if !explorerCollapsed {
-                    FileExplorerPanel(
-                        activeTerminalId: activeTerminalId,
-                        activeTerminalCWD: activeTerminal?.cwd
-                    )
-                    .frame(width: settings.explorerWidth)
-                    .transition(.move(edge: .leading))
+                    leftPanel
+                        .frame(width: settings.explorerWidth)
+                        .transition(.move(edge: .leading))
                     ExplorerResizer(width: $settings.explorerWidth)
                 }
                 terminalPanel
@@ -147,6 +163,49 @@ struct ContentView: View {
                     sidebar
                         .frame(width: sidebarWidth)
                         .transition(.move(edge: .trailing))
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var leftPanel: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                ForEach(LeftPanelMode.allCases) { mode in
+                    Button {
+                        leftPanelMode = mode
+                    } label: {
+                        VStack(spacing: 2) {
+                            Image(systemName: mode.iconName)
+                                .font(.system(size: 12, weight: .medium))
+                            Text(mode.rawValue)
+                                .font(.system(size: 9, weight: .semibold))
+                                .lineLimit(1)
+                                .fixedSize()
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                        .foregroundColor(leftPanelMode == mode ? GOLD : .white.opacity(0.5))
+                        .background(
+                            Rectangle()
+                                .fill(leftPanelMode == mode ? Color.white.opacity(0.04) : Color.clear)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .background(BG_DARKEST.opacity(settings.translucentBackground ? AppSettings.shared.chromeAlpha * 1.3 : 1))
+            Divider().background(Color.white.opacity(0.06))
+            Group {
+                switch leftPanelMode {
+                case .files:
+                    FileExplorerPanel(
+                        activeTerminalId: activeTerminalId,
+                        activeTerminalCWD: activeTerminal?.cwd
+                    )
+                case .git:
+                    GitPanel(activeTerminalCWD: activeTerminal?.cwd)
                 }
             }
         }
@@ -590,12 +649,16 @@ struct ContentView: View {
     }
 
     private func nameForTerminal(_ t: TerminalSession) -> String {
-        if let sid = t.mode.sessionId,
+        // Prefer the live session ID (reflects /clear, which keeps the same
+        // PID but issues a new session). Fall back to whatever the mode
+        // was bound to at launch time.
+        if let sid = t.currentSessionId ?? t.mode.sessionId,
            let session = manager.sessions.first(where: { $0.sessionId == sid }) {
             return session.name
         }
         switch t.mode {
-        case .shell: return "shell"
+        case .shell:
+            return t.hasClaudeChild ? "claude" : "shell"
         case .claude: return "claude"
         case .watch(let sid): return "watch \(sid.prefix(6))"
         }
@@ -875,6 +938,18 @@ struct TitlebarLeadingChrome: View {
             }
             .buttonStyle(.plain)
             .help(bridge.explorerCollapsed ? "Show Files panel" : "Hide Files panel")
+
+            // Source Control toggle — opens the left panel in Git mode.
+            Button {
+                NotificationCenter.default.post(name: .openSourceControl, object: nil)
+            } label: {
+                ChromePill {
+                    Image(systemName: "arrow.triangle.branch").font(.system(size: 11))
+                }
+            }
+            .buttonStyle(.plain)
+            .help("Source Control (⌘⇧G)")
+            .keyboardShortcut("g", modifiers: [.command, .shift])
 
             if let terminal = bridge.activeTerminal {
                 if terminal.mode.isWatch {
