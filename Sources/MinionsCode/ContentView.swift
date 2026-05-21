@@ -304,23 +304,26 @@ struct ContentView: View {
 
         let bridge = ChromeBridge.shared
 
-        // Leading: we use the *trailing* accessory's leading-edge (the natural
-        // continuation of the title bar) for our buttons — Apple's
-        // `.leading` attribute on its own crashes into the traffic-light
-        // zone on Sequoia/Tahoe, depending on the spacing the OS gives.
-        // Use a dedicated leading-aligned accessory (with .fullScreen layout
-        // attribute) and let SwiftUI compute the natural width via
-        // intrinsicContentSize so Run Claude / cd / Editing never clip.
+        // Leading: explicit width that fits all buttons (Source Control,
+        // Files, Editing, cd, Run Claude). Self-sizing via
+        // intrinsicContentSize was unreliable — when bridge.activeTerminal
+        // toggled nil→non-nil, SwiftUI re-rendered but AppKit cached the
+        // smaller initial intrinsic size, hiding the new buttons. Fixed
+        // 520pt is wide enough; SwiftUI's HStack pads naturally and
+        // .fixedSize keeps text from squeezing.
         let leading = NSTitlebarAccessoryViewController()
-        let leadingHost = SelfSizingHostingView(rootView: TitlebarLeadingChrome(bridge: bridge))
+        let leadingHost = NSHostingView(rootView: TitlebarLeadingChrome(bridge: bridge))
         leadingHost.identifier = NSUserInterfaceItemIdentifier("MinionsChrome.leading")
+        leadingHost.translatesAutoresizingMaskIntoConstraints = true
+        leadingHost.frame = NSRect(x: 0, y: 0, width: 520, height: 32)
         leading.view = leadingHost
         leading.layoutAttribute = .leading
-        // Auto-hide is OS-controlled; we don't override.
 
         let trailing = NSTitlebarAccessoryViewController()
-        let trailingHost = SelfSizingHostingView(rootView: TitlebarTrailingChrome(bridge: bridge))
+        let trailingHost = NSHostingView(rootView: TitlebarTrailingChrome(bridge: bridge))
         trailingHost.identifier = NSUserInterfaceItemIdentifier("MinionsChrome.trailing")
+        trailingHost.translatesAutoresizingMaskIntoConstraints = true
+        trailingHost.frame = NSRect(x: 0, y: 0, width: 130, height: 32)
         trailing.view = trailingHost
         trailing.layoutAttribute = .trailing
 
@@ -986,11 +989,11 @@ struct TitlebarLeadingChrome: View {
                     }
                 }
             }
+            Spacer(minLength: 0)
         }
         .padding(.leading, 12)   // breathing room from traffic lights
         .padding(.trailing, 8)
-        .padding(.vertical, 4)
-        .fixedSize(horizontal: true, vertical: false)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
     }
 }
 
@@ -999,19 +1002,21 @@ struct TitlebarTrailingChrome: View {
     let bridge: ChromeBridge
 
     var body: some View {
-        ChromePillSegmentedActions(
-            onShowSettings: bridge.onShowSettings,
-            onToggleSidebar: bridge.onToggleSidebar,
-            sidebarCollapsed: bridge.sidebarCollapsed,
-            onDeleteJunk: bridge.onDeleteJunk,
-            onDeleteEmpty: bridge.onDeleteEmpty,
-            onAutoNameOpus: bridge.onAutoNameOpus,
-            onAutoNameAll: bridge.onAutoNameAll,
-            onRefresh: bridge.onRefresh
-        )
+        HStack(spacing: 0) {
+            Spacer(minLength: 0)
+            ChromePillSegmentedActions(
+                onShowSettings: bridge.onShowSettings,
+                onToggleSidebar: bridge.onToggleSidebar,
+                sidebarCollapsed: bridge.sidebarCollapsed,
+                onDeleteJunk: bridge.onDeleteJunk,
+                onDeleteEmpty: bridge.onDeleteEmpty,
+                onAutoNameOpus: bridge.onAutoNameOpus,
+                onAutoNameAll: bridge.onAutoNameAll,
+                onRefresh: bridge.onRefresh
+            )
+        }
         .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .fixedSize(horizontal: true, vertical: false)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
     }
 }
 
