@@ -303,19 +303,24 @@ struct ContentView: View {
         if alreadyInstalled { return }
 
         let bridge = ChromeBridge.shared
+
+        // Leading: we use the *trailing* accessory's leading-edge (the natural
+        // continuation of the title bar) for our buttons — Apple's
+        // `.leading` attribute on its own crashes into the traffic-light
+        // zone on Sequoia/Tahoe, depending on the spacing the OS gives.
+        // Use a dedicated leading-aligned accessory (with .fullScreen layout
+        // attribute) and let SwiftUI compute the natural width via
+        // intrinsicContentSize so Run Claude / cd / Editing never clip.
         let leading = NSTitlebarAccessoryViewController()
-        let leadingHost = NSHostingView(rootView: TitlebarLeadingChrome(bridge: bridge))
+        let leadingHost = SelfSizingHostingView(rootView: TitlebarLeadingChrome(bridge: bridge))
         leadingHost.identifier = NSUserInterfaceItemIdentifier("MinionsChrome.leading")
-        leadingHost.translatesAutoresizingMaskIntoConstraints = true
-        leadingHost.frame = NSRect(x: 0, y: 0, width: 280, height: 28)
         leading.view = leadingHost
         leading.layoutAttribute = .leading
+        // Auto-hide is OS-controlled; we don't override.
 
         let trailing = NSTitlebarAccessoryViewController()
-        let trailingHost = NSHostingView(rootView: TitlebarTrailingChrome(bridge: bridge))
+        let trailingHost = SelfSizingHostingView(rootView: TitlebarTrailingChrome(bridge: bridge))
         trailingHost.identifier = NSUserInterfaceItemIdentifier("MinionsChrome.trailing")
-        trailingHost.translatesAutoresizingMaskIntoConstraints = true
-        trailingHost.frame = NSRect(x: 0, y: 0, width: 130, height: 28)
         trailing.view = trailingHost
         trailing.layoutAttribute = .trailing
 
@@ -899,6 +904,20 @@ struct ReadOnlyToastOverlay: View {
     }
 }
 
+/// NSHostingView that reports its SwiftUI content's natural size as its
+/// intrinsicContentSize. Wires `sizingOptions = .intrinsicContentSize` so
+/// `NSTitlebarAccessoryViewController` lays it out at exactly the width
+/// the content needs — no fixed-frame truncation, no extra padding.
+final class SelfSizingHostingView<Content: View>: NSHostingView<Content> {
+    @MainActor required init(rootView: Content) {
+        super.init(rootView: rootView)
+        self.sizingOptions = [.intrinsicContentSize, .preferredContentSize]
+        self.translatesAutoresizingMaskIntoConstraints = true
+    }
+    @available(*, unavailable)
+    @MainActor required init?(coder aDecoder: NSCoder) { fatalError() }
+}
+
 /// Singleton bridge between SwiftUI's ContentView state and the AppKit-hosted
 /// title-bar chrome. The chrome lives in NSTitlebarAccessoryViewController
 /// hosts that survive across SwiftUI re-renders, so they can't reach into
@@ -967,10 +986,11 @@ struct TitlebarLeadingChrome: View {
                     }
                 }
             }
-            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 8)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .padding(.leading, 12)   // breathing room from traffic lights
+        .padding(.trailing, 8)
+        .padding(.vertical, 4)
+        .fixedSize(horizontal: true, vertical: false)
     }
 }
 
@@ -979,21 +999,19 @@ struct TitlebarTrailingChrome: View {
     let bridge: ChromeBridge
 
     var body: some View {
-        HStack(spacing: 0) {
-            Spacer(minLength: 0)
-            ChromePillSegmentedActions(
-                onShowSettings: bridge.onShowSettings,
-                onToggleSidebar: bridge.onToggleSidebar,
-                sidebarCollapsed: bridge.sidebarCollapsed,
-                onDeleteJunk: bridge.onDeleteJunk,
-                onDeleteEmpty: bridge.onDeleteEmpty,
-                onAutoNameOpus: bridge.onAutoNameOpus,
-                onAutoNameAll: bridge.onAutoNameAll,
-                onRefresh: bridge.onRefresh
-            )
-        }
+        ChromePillSegmentedActions(
+            onShowSettings: bridge.onShowSettings,
+            onToggleSidebar: bridge.onToggleSidebar,
+            sidebarCollapsed: bridge.sidebarCollapsed,
+            onDeleteJunk: bridge.onDeleteJunk,
+            onDeleteEmpty: bridge.onDeleteEmpty,
+            onAutoNameOpus: bridge.onAutoNameOpus,
+            onAutoNameAll: bridge.onAutoNameAll,
+            onRefresh: bridge.onRefresh
+        )
         .padding(.horizontal, 8)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+        .padding(.vertical, 4)
+        .fixedSize(horizontal: true, vertical: false)
     }
 }
 
