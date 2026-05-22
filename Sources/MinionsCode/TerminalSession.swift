@@ -93,17 +93,25 @@ final class TerminalKeyMonitor {
             return nil
         }
 
+        // ⌘← / ⌘→ — switch tabs (matches Safari/Chrome behavior).
+        // Must come before the readline ⌘-arrow shortcuts below so the
+        // tab-switch wins. Ctrl+arrow keys still send readline a/e via
+        // option flag below.
+        if mods == [.command] && event.specialKey == .leftArrow {
+            NotificationCenter.default.post(name: .prevTab, object: nil); return nil
+        }
+        if mods == [.command] && event.specialKey == .rightArrow {
+            NotificationCenter.default.post(name: .nextTab, object: nil); return nil
+        }
+
+        // Real keystroke — user wants the prompt at the bottom.
+        (terminal as? MinionsTerminalView)?.unpin()
+
         if mods.contains(.command) && (event.specialKey == .delete || event.keyCode == 51) {
             terminal.send(txt: "\u{15}"); return nil
         }
         if mods.contains(.command) && event.keyCode == 117 {
             terminal.send(txt: "\u{0B}"); return nil
-        }
-        if mods.contains(.command) && event.specialKey == .leftArrow {
-            terminal.send(txt: "\u{01}"); return nil
-        }
-        if mods.contains(.command) && event.specialKey == .rightArrow {
-            terminal.send(txt: "\u{05}"); return nil
         }
         if mods.contains(.option) && (event.specialKey == .delete || event.keyCode == 51) {
             terminal.send(txt: "\u{17}"); return nil
@@ -308,6 +316,54 @@ final class TerminalSession: @unchecked Sendable {
 
     func sendCommand(_ command: String) {
         terminalView.send(txt: "\(command)\n")
+    }
+
+    /// Reads the first real user prompt from the session's JSONL file.
+    /// Returns nil if no JSONL exists or no user message found.
+    /// Runs synchronously on a background thread — call from Task.detached.
+    nonisolated static func readInitialPrompt(sessionId: String?) -> String? {
+        guard let sid = sessionId, !sid.isEmpty else { return nil }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let projectsDir = home.appendingPathComponent(".claude/projects")
+        guard let projects = try? FileManager.default.contentsOfDirectory(at: projectsDir, includingPropertiesForKeys: nil) else { return nil }
+        var jsonlURL: URL?
+        for project in projects {
+            let candidate = project.appendingPathComponent("\(sid).jsonl")
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                jsonlURL = candidate
+                break
+            }
+        }
+        guard let url = jsonlURL,
+              let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        // Read up to 512KB to find the first user message
+        let chunk = handle.readData(ofLength: 512 * 1024)
+        guard let content = String(data: chunk, encoding: .utf8) else { return nil }
+        for line in content.components(separatedBy: .newlines) where !line.isEmpty {
+            guard let lineData = line.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else { continue }
+            guard obj["type"] as? String == "user" else { continue }
+            if obj["isMeta"] as? Bool == true { continue }
+            guard let message = obj["message"] as? [String: Any],
+                  let content = message["content"] else { continue }
+            let text: String
+            if let s = content as? String {
+                text = s
+            } else if let arr = content as? [[String: Any]] {
+                text = arr.compactMap { c -> String? in
+                    guard c["type"] as? String == "text" else { return nil }
+                    return c["text"] as? String
+                }.joined(separator: "\n")
+            } else { continue }
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { continue }
+            // Skip system-reminder-only messages and local command output
+            if trimmed.hasPrefix("<system-reminder>") || trimmed.hasPrefix("<command-name>") { continue }
+            if trimmed.hasPrefix("<local-command-") { continue }
+            return trimmed
+        }
+        return nil
     }
 
     func toggleReadOnly() {

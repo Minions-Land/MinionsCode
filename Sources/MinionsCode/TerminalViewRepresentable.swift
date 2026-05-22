@@ -22,54 +22,73 @@ struct TerminalViewRepresentable: NSViewRepresentable {
 /// snap the viewport back to the bottom on every new line — useless when a
 /// long Claude session is streaming and you're trying to read older output.
 ///
-/// We can't override `scrollWheel` (it's `public` not `open`), and SwiftTerm's
-/// internal `userScrolling` flag is also internal. But `scrolled(source:yDisp:)`
-/// IS open, and it fires on every yDisp change — both user-initiated and
-/// auto-scroll on output. We use that as the choke point.
-///
 /// Strategy:
-///   - When `scrolled` fires, classify the cause via heuristic on scrollPosition.
-///   - If position < 0.98, user is reading history → record yDisp.
-///   - If a *later* scrolled callback bumps yDisp past our recorded value
-///     (auto-scroll on output), snap back to the recorded row.
-///   - When user scrolls back to ~bottom (position >= 0.98), clear.
+///   - `scrolled(source:yDisp:)` fires on every yDisp change (user or auto).
+///   - We NEVER clear the pin from within `scrolled` — auto-scroll on output
+///     would immediately clear it (scrollPosition reads 1.0 after SwiftTerm
+///     moves the viewport). Instead, we always restore to the pinned row.
+///   - The pin is cleared only by explicit user actions: mouseDown, keyDown
+///     (via TerminalKeyMonitor), or user scrolling to the bottom (detected
+///     via a local scroll-wheel event monitor).
 final class MinionsTerminalView: LocalProcessTerminalView {
     private var pinnedYDisp: Int? = nil
     private var inRestore = false
+    private var userScrolling = false
+    nonisolated(unsafe) private var scrollMonitor: Any?
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            self?.handleScrollWheel(event)
+            return event
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    deinit {
+        if let m = scrollMonitor { NSEvent.removeMonitor(m) }
+    }
+
+    private func handleScrollWheel(_ event: NSEvent) {
+        guard event.window === self.window,
+              let eventView = window?.contentView?.hitTest(event.locationInWindow),
+              eventView === self || eventView.isDescendant(of: self) else { return }
+        userScrolling = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self else { return }
+            self.userScrolling = false
+            if self.scrollPosition >= 0.98 {
+                self.pinnedYDisp = nil
+            }
+        }
+    }
 
     override func scrolled(source terminal: Terminal, yDisp: Int) {
         super.scrolled(source: terminal, yDisp: yDisp)
-        // Re-entrancy guard — our own scrollTo() below will trigger another
-        // scrolled callback; we must ignore it to avoid an infinite loop.
         if inRestore { return }
 
-        let pos = scrollPosition  // 0.0 (top) ... 1.0 (bottom)
-        let atBottom = pos >= 0.98
-
-        if atBottom {
-            // User is back at the bottom — release the pin so future
-            // auto-scrolls work normally again.
-            pinnedYDisp = nil
+        if userScrolling {
+            if scrollPosition >= 0.98 {
+                pinnedYDisp = nil
+            } else if pinnedYDisp == nil {
+                pinnedYDisp = yDisp
+            } else {
+                pinnedYDisp = yDisp
+            }
             return
         }
 
-        // Not at bottom. Either user just scrolled up, or output
-        // auto-scrolled while we had a pin in place.
+        // Not user-initiated. If pinned, restore.
         if let pinned = pinnedYDisp {
             if yDisp != pinned {
-                // Output bumped us — restore.
                 inRestore = true
                 scrollTo(row: pinned, notifyAccessibility: false)
                 inRestore = false
             }
-        } else {
-            // First scroll-away from the bottom — record the position.
-            pinnedYDisp = yDisp
         }
     }
 
-    /// External signal: clear the pin. Called when the user types or clicks,
-    /// since they probably want to interact with the prompt at the bottom.
     func unpin() {
         pinnedYDisp = nil
     }

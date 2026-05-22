@@ -581,7 +581,7 @@ struct ContentView: View {
     // MARK: - Terminal Panel
 
     private var terminalPanel: some View {
-        ZStack {
+        ZStack(alignment: .top) {
             if let tid = activeTerminalId, let terminal = terminals[tid] {
                 IsolatedTerminalView(terminal: terminal)
                     .id(tid)
@@ -604,6 +604,12 @@ struct ContentView: View {
                     }
                 }
             )
+            if let tid = activeTerminalId, let terminal = terminals[tid] {
+                PromptBar(terminal: terminal)
+                    .id(tid)
+                    .padding(.top, 4)
+                    .padding(.horizontal, 10)
+            }
         }
         .background(BG_DARKEST.opacity(settings.translucentBackground ? AppSettings.shared.terminalAlpha : 1))
     }
@@ -904,6 +910,134 @@ struct ReadOnlyToastOverlay: View {
         }
         .animation(.easeInOut(duration: 0.2), value: center.visibleSessionId)
         .allowsHitTesting(center.visibleSessionId != nil)
+    }
+}
+
+/// Sticky prompt bar at the top of a Claude session terminal. Shows the
+/// initial user prompt so a long, scrolled-back conversation never makes
+/// the user lose track of what task they kicked off. Collapsed by default
+/// (one truncated line); click the chevron to expand the full text.
+///
+/// Reads the prompt asynchronously from the session JSONL on first display,
+/// then caches the result against the session ID. Re-loads when the session
+/// ID changes (e.g. /clear inside a Claude tab).
+struct PromptBar: View {
+    let terminal: TerminalSession
+    @State private var promptText: String?
+    @State private var loadedForSessionId: String?
+    @State private var expanded = false
+    @State private var collapsed = false
+
+    private var sessionId: String? {
+        terminal.currentSessionId ?? terminal.mode.sessionId
+    }
+
+    private var shouldShow: Bool {
+        // Show for any tab that has (or has had) a Claude session.
+        if case .claude = terminal.mode { return true }
+        if terminal.mode.isWatch { return true }
+        if terminal.hasClaudeChild { return true }
+        return false
+    }
+
+    var body: some View {
+        Group {
+            if shouldShow, let text = promptText, !text.isEmpty {
+                content(text: text)
+            }
+        }
+        .task(id: sessionId) {
+            await load()
+        }
+    }
+
+    @ViewBuilder
+    private func content(text: String) -> some View {
+        if collapsed {
+            // Folded-up tab — just a small chevron at the top edge.
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    collapsed = false
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .bold))
+                    Text("Goal")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                .foregroundColor(GOLD.opacity(0.7))
+                .padding(.horizontal, 10).padding(.vertical, 3)
+                .background(
+                    Capsule()
+                        .fill(.black.opacity(0.55))
+                        .overlay(Capsule().stroke(GOLD.opacity(0.2), lineWidth: 0.5))
+                )
+            }
+            .buttonStyle(.plain)
+            .help("Show task prompt")
+            .frame(maxWidth: .infinity, alignment: .center)
+        } else {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "target")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(GOLD)
+                    .padding(.top, 2)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(text)
+                        .font(.system(size: 11))
+                        .foregroundColor(.white.opacity(0.85))
+                        .lineLimit(expanded ? nil : 1)
+                        .truncationMode(.tail)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                HStack(spacing: 4) {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+                    } label: {
+                        Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(.white.opacity(0.5))
+                            .frame(width: 18, height: 18)
+                    }
+                    .buttonStyle(.plain)
+                    .help(expanded ? "Collapse" : "Expand full prompt")
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            collapsed = true
+                            expanded = false
+                        }
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(.white.opacity(0.4))
+                            .frame(width: 18, height: 18)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Hide goal bar")
+                }
+            }
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(.black.opacity(0.55))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(GOLD.opacity(0.18), lineWidth: 0.5))
+            )
+            .shadow(color: .black.opacity(0.25), radius: 4, y: 1)
+        }
+    }
+
+    private func load() async {
+        guard shouldShow, let sid = sessionId else { return }
+        if loadedForSessionId == sid { return }
+        let text = await Task.detached(priority: .utility) {
+            TerminalSession.readInitialPrompt(sessionId: sid)
+        }.value
+        await MainActor.run {
+            self.promptText = text
+            self.loadedForSessionId = sid
+        }
     }
 }
 
